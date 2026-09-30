@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
 
 // registerGroupTools wires every group-management MCP tool.
@@ -120,20 +122,26 @@ func (s *Server) registerGetGroupInfo() {
 }
 
 type updateGroupParticipantsArgs struct {
-	ChatJID      string   `json:"chat_jid"`
-	Participants []string `json:"participants"`
-	Action       string   `json:"action"`
+	ChatJID       string   `json:"chat_jid"`
+	Participants  []string `json:"participants"`
+	Action        string   `json:"action"`
+	SendInvite    *bool    `json:"send_invite,omitempty"`
+	InviteMessage string   `json:"invite_message,omitempty"`
 }
 
 func (s *Server) registerUpdateGroupParticipants() {
 	tool := mcp.NewTool("update_group_participants",
-		mcp.WithDescription("Add, remove, promote, or demote participants of a group; the chat shows a system message naming each affected participant. Reversible by calling again with the inverse action (`add` ↔ `remove`, `promote` ↔ `demote`). Prerequisite: the paired user must be a group admin. Returns a JSON object describing the per-participant outcome."),
-		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
-		mcp.WithArray("participants", mcp.Required(), mcp.Items(map[string]any{"type": "string"}), mcp.Description("participants to mutate, as bare phone digits or individual JIDs ("+jidDesc+")")),
+		mcp.WithDescription("Add, remove, promote, or demote participants of a group after first checking that the paired user is a group admin (or, for `add`, that the group lets every member add) — if not, it fails and nothing changes. The group shows a system message for each change; people whose privacy settings block being added directly get a WhatsApp group-invite card in their 1:1 chat instead (unless `send_invite=false`) and join by tapping it; invites share the outbound rate limit (about one per 45–90 s), so in a batch the rest come back as `invite_required` with a retry hint — repeat the add for them later. Reversible by calling again with the inverse action (`add` ↔ `remove`, `promote` ↔ `demote`), though a sent invite cannot be recalled. Returns `{chat_jid, group_name, action, is_admin, results: [{input, jid, status, error_code?, error?, invite_message_id?, invite_expires_at?}]}` where status is one of added, removed, promoted, demoted, already_member, not_member, invite_sent, invite_required, invite_failed, failed."),
+		mcp.WithString("chat_jid", mcp.Required(), mcp.Description("group JID as `<digits>-<timestamp>@g.us` or `<digits>@g.us` (use list_groups to find it)")),
+		mcp.WithArray("participants", mcp.Required(), mcp.Items(map[string]any{"type": "string"}), mcp.Description("people to change, as phone digits only (E.164 without `+`, no spaces) or individual JIDs (`<digits>@s.whatsapp.net` or `<digits>@lid`); each at most once")),
 		mcp.WithString("action", mcp.Required(), mcp.Enum("add", "remove", "promote", "demote"), mcp.Description("mutation to perform: `add`, `remove`, `promote` (to admin), or `demote` (from admin)")),
+		mcp.WithBoolean("send_invite", mcp.DefaultBool(true), mcp.Description("only for `add`: when someone's privacy settings block adding them directly, send them a group-invite card in their 1:1 chat (defaults to true); false just reports `invite_required`")),
+		mcp.WithString("invite_message", mcp.Description("optional caption shown on the invite card (defaults to none); ignored unless an invite is sent")),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithIdempotentHintAnnotation(true),
+		// Not idempotent: repeating an add re-sends invites to anyone who
+		// has not joined yet.
+		mcp.WithIdempotentHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a updateGroupParticipantsArgs) (*mcp.CallToolResult, error) {
@@ -143,11 +151,11 @@ func (s *Server) registerUpdateGroupParticipants() {
 		if len(a.Participants) == 0 {
 			return mcp.NewToolResultError("participants: required"), nil
 		}
-		js, err := s.client.UpdateGroupParticipants(ctx, a.ChatJID, a.Participants, a.Action)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText(js), nil
+		report, err := s.client.UpdateGroupParticipants(ctx, a.ChatJID, a.Participants, a.Action, client.ParticipantUpdateOptions{
+			SendInvite:    a.SendInvite == nil || *a.SendInvite,
+			InviteMessage: a.InviteMessage,
+		})
+		return toolResult(report, err)
 	}))
 }
 

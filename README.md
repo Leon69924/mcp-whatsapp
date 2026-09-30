@@ -258,7 +258,7 @@ Flags and environment variables for `serve`:
 | `leave_group` | Leave a group |
 | `list_groups` | List all groups the user is a member of |
 | `get_group_info` | Full group metadata (participants, settings, invite config) |
-| `update_group_participants` | Add / remove / promote / demote participants (`action: add\|remove\|promote\|demote`) |
+| `update_group_participants` | Add / remove / promote / demote participants (`action: add\|remove\|promote\|demote`). Checks first that you are an admin; people whose privacy settings block a direct add get a group-invite card in their 1:1 chat (`send_invite`, default true; optional `invite_message` caption) |
 | `set_group_name` | Change the group subject |
 | `set_group_topic` | Change the group description; empty string clears it |
 | `set_group_announce` | Toggle announce-only mode (only admins can send) |
