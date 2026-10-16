@@ -236,6 +236,54 @@ func (c *Client) Login(ctx context.Context, qrOut io.Writer) error {
 	}
 }
 
+// PairPhoneLogin runs the phone-number pairing flow headlessly. Connects,
+// requests a pairing code from WhatsApp, writes the formatted code to codeOut,
+// and blocks until the phone confirms pairing (or ctx is done).
+func (c *Client) PairPhoneLogin(ctx context.Context, phone string, codeOut io.Writer) error {
+	if c.wa.Store.ID != nil {
+		// Already paired; just connect.
+		return c.wa.ConnectContext(ctx)
+	}
+
+	qrChan, err := c.wa.GetQRChannel(ctx)
+	if err != nil {
+		return fmt.Errorf("get QR channel: %w", err)
+	}
+	if err := c.wa.ConnectContext(ctx); err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+
+	code, err := c.PairPhone(ctx, phone)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(codeOut, "\nEnter this code in WhatsApp (Settings → Linked Devices → Link a Device → Link with phone number instead): %s\n", FormatPairingCode(code))
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok := <-qrChan:
+			if !ok {
+				return errors.New("QR channel closed before pairing completed")
+			}
+			switch evt.Event {
+			case "success":
+				// Give the server a moment to persist the session.
+				time.Sleep(500 * time.Millisecond)
+				return nil
+			case "timeout":
+				return errors.New("pairing code entry timed out")
+			case "", "code":
+				// "code" is the QR-payload event; irrelevant when pairing
+				// by phone number. Skip quietly.
+			default:
+				c.log.Warnf("pairing event: %s", evt.Event)
+			}
+		}
+	}
+}
+
 // Disconnect gracefully disconnects the underlying client.
 func (c *Client) Disconnect() {
 	if c.wa != nil {

@@ -17,9 +17,10 @@ func runLogin(storeDir string, redactor *security.Redactor, args []string) int {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "whatsapp-mcp login: pair this device via QR; writes session to <store>/whatsapp.db. Ctrl-C aborts.")
-		fmt.Fprintln(os.Stderr, "\nUsage: whatsapp-mcp [-store DIR] login")
+		fmt.Fprintln(os.Stderr, "whatsapp-mcp login: pair this device via QR (or a phone-number pairing code with -phone); writes session to <store>/whatsapp.db. Ctrl-C aborts.")
+		fmt.Fprintln(os.Stderr, "\nUsage: whatsapp-mcp [-store DIR] login [-phone +<international number>]")
 	}
+	phone := fs.String("phone", "", "pair by phone number instead of QR: enter the printed code in WhatsApp (international format, e.g. +919876543210)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -54,10 +55,18 @@ func runLogin(storeDir string, redactor *security.Redactor, args []string) int {
 	}
 	defer c.Disconnect()
 
-	fmt.Fprintln(os.Stderr, "Starting pairing flow — scan the QR code below with your phone.")
-	if err := c.Login(ctx, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
-		return 1
+	if *phone != "" {
+		fmt.Fprintln(os.Stderr, "Starting phone-number pairing flow.")
+		if err := c.PairPhoneLogin(ctx, *phone, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
+			return 1
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Starting pairing flow — scan the QR code below with your phone.")
+		if err := c.Login(ctx, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
+			return 1
+		}
 	}
 	fmt.Fprintln(os.Stderr, "Paired successfully. You can now run 'whatsapp-mcp serve'.")
 	return 0

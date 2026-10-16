@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>WhatsApp pairing code</title>
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}
+code{font-size:2rem;letter-spacing:0.2rem;background:#f0f0f0;padding:0.5rem 1rem;display:inline-block;border-radius:0.5rem}</style>
+</head><body>
+<h1>Pair with phone number</h1>
+{{if .Code}}
+<p>On your phone: <em>Settings</em> &rarr; <em>Linked Devices</em> &rarr; <em>Link a Device</em> &rarr; <em>Link with phone number instead</em>, then enter:</p>
+<p><code>{{.Code}}</code></p>
+<p><small>The code expires shortly; request a new one if it lapses. This page does not auto-refresh.</small></p>
+{{else}}
+<p><strong>{{.Message}}</strong></p>
+<p><a href="/pair">Back to QR pairing</a></p>
+{{end}}
+</body></html>

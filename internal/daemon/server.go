@@ -94,7 +94,11 @@ func (s *Server) BoundAddr() string {
 // sequence: drain HTTP → Disconnect driver.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-	handlers := newPairHandlers(s.cache, s.cfg.Driver)
+	var coder pairCoder
+	if pc, ok := s.cfg.Driver.(pairCoder); ok {
+		coder = pc
+	}
+	handlers := newPairHandlers(s.cache, s.cfg.Driver, coder)
 	handlers.mount(mux)
 	if s.cfg.MCPMount != nil {
 		s.cfg.MCPMount(mux)

@@ -54,4 +54,10 @@ func (p *productionDriver) Connect(ctx context.Context, onLoggedOut func()) erro
 
 func (p *productionDriver) Logout(ctx context.Context) error { return p.c.Logout(ctx) }
 
+// PairPhone lets the daemon's /pair/code endpoint trigger the WhatsApp
+// "link with phone number" flow on the underlying client.
+func (p *productionDriver) PairPhone(ctx context.Context, phone string) (string, error) {
+	return p.c.PairPhone(ctx, phone)
+}
+
 func (p *productionDriver) Disconnect() { p.c.Disconnect() }

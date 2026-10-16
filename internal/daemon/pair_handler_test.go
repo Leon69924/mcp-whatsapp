@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
 
 type fakeResetter struct {
@@ -27,7 +29,7 @@ func newTestHandlers(paired bool, qr string, err error) (*pairHandlers, *fakeRes
 		cache.SetQR(qr)
 	}
 	reset := &fakeResetter{err: err}
-	h := newPairHandlers(cache, reset)
+	h := newPairHandlers(cache, reset, nil)
 	return h, reset
 }
 
@@ -241,7 +243,7 @@ func TestPairReset_RateLimited(t *testing.T) {
 func TestPairTemplate_EscapesToken(t *testing.T) {
 	cache := NewPairCache()
 	cache.SetPaired()
-	h := newPairHandlers(cache, &fakeResetter{})
+	h := newPairHandlers(cache, &fakeResetter{}, nil)
 
 	// Inject a CSRFToken containing a script tag to verify html/template escapes it.
 	// We need to call the template directly since the handler doesn't set CSRFToken yet.
@@ -262,4 +264,90 @@ func TestPairTemplate_EscapesToken(t *testing.T) {
 
 	// Sanity: the handler still works.
 	_ = h
+}
+
+type fakePairCoder struct {
+	code string
+	err  error
+}
+
+func (f *fakePairCoder) PairPhone(_ context.Context, _ string) (string, error) {
+	return f.code, f.err
+}
+
+func TestHandlePairCode_Success(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{code: "ABCD1234"})
+	h.csrfToken = "tok"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=+919876543210"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.handlePairCode(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "ABCD-1234") {
+		t.Fatalf("expected formatted code in body, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlePairCode_RateLimited(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
+	// Burst is 1; the first request consumes it (it fails CSRF first, but the
+	// limiter has already allowed and spent its token), so the next is 429.
+	w := httptest.NewRecorder()
+	h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
+	w = httptest.NewRecorder()
+	h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status: want 429, got %d", w.Code)
+	}
+}
+
+func TestHandlePairCode_NoCoder(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, nil)
+	w := httptest.NewRecorder()
+	h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status: want 501, got %d", w.Code)
+	}
+}
+
+func TestHandlePairCode_InvalidPhone(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
+	h.csrfToken = "tok"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=0123456"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.handlePairCode(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "valid international phone number") {
+		t.Fatalf("expected validation message, got: %s", w.Body.String())
+	}
+}
+
+func TestNormalizePairingPhone(t *testing.T) {
+	if got := normalizePairingPhone("+91 98765-43210"); got != "919876543210" {
+		t.Fatalf("normalize: want 919876543210, got %q", got)
+	}
+	if got := normalizePairingPhone("0123456789"); got != "" {
+		t.Fatalf("normalize leading zero: want empty, got %q", got)
+	}
+	if got := normalizePairingPhone("123"); got != "" {
+		t.Fatalf("normalize too short: want empty, got %q", got)
+	}
+}
+
+func TestFormatPairingCode(t *testing.T) {
+	if got := client.FormatPairingCode("ABCD1234"); got != "ABCD-1234" {
+		t.Fatalf("want ABCD-1234, got %q", got)
+	}
+	if got := client.FormatPairingCode("SHORT"); got != "SHORT" {
+		t.Fatalf("want SHORT unchanged, got %q", got)
+	}
 }
