@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/github/license/Sealjay/mcp-whatsapp)](LICENSE)
 [![CI](https://github.com/Sealjay/mcp-whatsapp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sealjay/mcp-whatsapp/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Sealjay/mcp-whatsapp)](https://goreportcard.com/report/github.com/Sealjay/mcp-whatsapp)
-[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![MCP](https://img.shields.io/badge/MCP-protocol-6366f1)](https://modelcontextprotocol.io/)
 [![42 tools](https://img.shields.io/badge/tools-42-blue)]()
 [![whatsmeow](https://img.shields.io/badge/whatsmeow-multidevice-25D366?logo=whatsapp&logoColor=white)](https://github.com/tulir/whatsmeow)
@@ -27,7 +27,7 @@ This started as a fork of [lharries/whatsapp-mcp](https://github.com/lharries/wh
 
 ### Prerequisites
 
-- Go 1.25+ (build-time only; runtime needs just the compiled binary).
+- Go 1.26+ (build-time only; runtime needs just the compiled binary).
 - An MCP client that speaks HTTP (Claude Desktop, Cursor, Claude Code, etc.).
 - FFmpeg (_optional_) — required only for `send_audio_message` when the input is not already `.ogg` Opus. Without it, use `send_file` to send raw audio.
 - **Windows:** CGO must be enabled — see [docs/windows.md](docs/windows.md).
@@ -55,7 +55,7 @@ Scan the QR code with WhatsApp on your phone (*Settings → Linked Devices → L
 
 ### Connect your MCP client
 
-`whatsapp-mcp serve` is an HTTP daemon on `127.0.0.1:8765` (or `$WHATSAPP_MCP_ADDR`). MCP clients connect to it over HTTP:
+`whatsapp-mcp serve` is an HTTP daemon on `127.0.0.1:8765` (or `$WHATSAPP_MCP_ADDR`). It is stateless (no `Mcp-Session-Id`) and speaks MCP 2026-07-28 as well as older revisions. MCP clients connect to it over HTTP:
 
 Claude Desktop's `claude_desktop_config.json` doesn't support a bare `url`/`type: http` entry the way Claude Code and Cursor do — it only launches stdio servers via `command`/`args`. Bridge it with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) instead:
 
@@ -124,7 +124,7 @@ One binary, seven internal packages:
 cmd/whatsapp-mcp/       login / serve / smoke subcommands
 internal/client/        whatsmeow client wrapper (send, download, events, history, features)
 internal/daemon/        HTTP server, pairing state machine, /pair endpoint
-internal/mcp/           mark3labs/mcp-go server + tool registrations
+internal/mcp/           mark3labs/mcp-go v1 server + tool registrations
 internal/media/         ogg parsing, waveform synthesis, ffmpeg shell-out
 internal/security/      path allowlisting, filename sanitisation, log redaction
 internal/store/         SQLite cache, LID resolution, query layer

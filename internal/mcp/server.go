@@ -32,7 +32,7 @@ type Server struct {
 func NewServer(c *client.Client, cache pairingCache) *Server {
 	mcpSrv := server.NewMCPServer(
 		"whatsapp",
-		"0.5.0",
+		"0.5.1",
 		server.WithToolCapabilities(true),
 	)
 	s := &Server{client: c, mcp: mcpSrv, cache: cache}
@@ -47,6 +47,8 @@ func (s *Server) MCP() *server.MCPServer { return s.mcp }
 // AttachHTTP mounts the MCP Streamable HTTP handler on mux at /mcp. The
 // actual listener lifecycle is owned by the caller (internal/daemon).
 func (s *Server) AttachHTTP(mux *http.ServeMux) {
-	httpHandler := server.NewStreamableHTTPServer(s.mcp)
+	// Stateless: nothing here is session-scoped (the pairing cache is process-wide
+	// device state), so legacy clients get no Mcp-Session-Id either.
+	httpHandler := server.NewStreamableHTTPServer(s.mcp, server.WithStateLess(true))
 	mux.Handle("/mcp", httpHandler)
 }
