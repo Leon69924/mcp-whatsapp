@@ -34,7 +34,7 @@ type pairDriver interface {
 // mux is being built so the caller can attach additional handlers (in
 // practice, the /mcp Streamable HTTP handler from internal/mcp).
 //
-// AuthToken, if non-empty, gates /mcp and /pair/* behind the HTTP header
+// AuthToken, if non-empty, gates /mcp, /pair/*, /approvals/* and /access/* behind the HTTP header
 // `Authorization: Bearer <token>`. Loopback-bound operation passes an
 // empty token and leaves these routes unauthenticated.
 type Config struct {
@@ -48,6 +48,8 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	cache *PairCache
+	// operator serves /approvals and /access; nil when no backends were set.
+	operator *operatorHandlers
 
 	mu         sync.Mutex
 	httpServer *http.Server
@@ -75,6 +77,13 @@ func New(cfg Config) (*Server, error) {
 // daemon before wiring the cache into the MCP server.
 func (s *Server) Cache() *PairCache { return s.cache }
 
+// SetOperator installs the backends of the operator pages (/approvals and
+// /access). Like SetMCPMount, it must be called before Run; without it the
+// pages are not served.
+func (s *Server) SetOperator(approvals approvalBackend, access accessBackend) {
+	s.operator = newOperatorHandlers(approvals, access)
+}
+
 // SetMCPMount installs the MCP HTTP mount after construction. The daemon owns
 // the pair cache, so serve.go builds the daemon first, hands its cache to the
 // MCP server, then mounts the MCP handler here. cfg.MCPMount is read in Run,
@@ -100,6 +109,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	handlers := newPairHandlers(s.cache, s.cfg.Driver, coder)
 	handlers.mount(mux)
+	if s.operator != nil {
+		s.operator.mount(mux)
+	}
 	if s.cfg.MCPMount != nil {
 		s.cfg.MCPMount(mux)
 	} else {
@@ -110,6 +122,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	rootHandler := authMiddleware(mux, s.cfg.AuthToken)
+	if s.cfg.AuthToken == "" {
+		rootHandler = loopbackHostMiddleware(rootHandler, s.BoundAddr)
+	}
 
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
@@ -186,6 +201,32 @@ func (s *Server) onLoggedOut(ctx context.Context) func() {
 	}
 }
 
+// loopbackHostMiddleware refuses requests whose Host header is not a loopback
+// name for the bound port. Without a bearer token the daemon trusts loopback
+// alone, and a DNS-rebinding page (attacker.example resolving to 127.0.0.1)
+// would otherwise be same-origin with /mcp, /approvals and /access. With a
+// token, the browser cannot attach it, so authMiddleware already covers this.
+func loopbackHostMiddleware(next http.Handler, boundAddr func() string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, port, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			http.Error(w, "host: must be a loopback address with port", http.StatusMisdirectedRequest)
+			return
+		}
+		_, boundPort, err := net.SplitHostPort(boundAddr())
+		if err != nil || port != boundPort {
+			http.Error(w, "host: port does not match the daemon", http.StatusMisdirectedRequest)
+			return
+		}
+		switch host {
+		case "127.0.0.1", "localhost", "::1":
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "host: must be 127.0.0.1, localhost or [::1]", http.StatusMisdirectedRequest)
+		}
+	})
+}
+
 func authMiddleware(next http.Handler, token string) http.Handler {
 	if token == "" {
 		return next
@@ -208,8 +249,10 @@ func requiresAuth(path string) bool {
 	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
 		return true
 	}
-	if path == "/pair" || strings.HasPrefix(path, "/pair/") {
-		return true
+	for _, prefix := range []string{"/pair", "/approvals", "/access"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
 	}
 	return false
 }

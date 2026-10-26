@@ -1,13 +1,13 @@
 # CLAUDE.md
 
-Single Go binary that runs as an HTTP MCP daemon (default `127.0.0.1:8765`) wrapping [whatsmeow](https://github.com/tulir/whatsmeow) to expose a personal WhatsApp account as MCP tools. `whatsapp-mcp serve` is the long-running process: it tracks WhatsApp events, caches messages locally, serves MCP at `/mcp`, and hosts the pairing UI at `/pair`. MCP clients connect over stateless Streamable HTTP (`server.WithStateLess(true)`; MCP 2026-07-28 and older revisions, no `Mcp-Session-Id`).
+Single Go binary that runs as an HTTP MCP daemon (default `127.0.0.1:8765`) wrapping [whatsmeow](https://github.com/tulir/whatsmeow) to expose a personal WhatsApp account as MCP tools. `whatsapp-mcp serve` is the long-running process: it tracks WhatsApp events, caches messages locally, serves MCP at `/mcp`, and hosts the pairing UI at `/pair` and the operator pages `/approvals` and `/access`. MCP clients connect over stateless Streamable HTTP (`server.WithStateLess(true)`; MCP 2026-07-28 and older revisions, no `Mcp-Session-Id`).
 
 ## Structure
 
 ```
 cmd/whatsapp-mcp/       login, serve, smoke subcommands
 internal/client/        whatsmeow client wrapper (send, download, events, history, features)
-internal/daemon/        HTTP server, pairing state machine, /pair endpoint
+internal/daemon/        HTTP server, pairing state machine, /pair, /approvals, /access
 internal/mcp/           mark3labs/mcp-go v1 server + tool registrations
 internal/media/         ogg analysis + ffmpeg shell-out
 internal/security/      path allowlisting, filename sanitisation, log redaction
@@ -47,7 +47,7 @@ make upgrade-check
 
 ## Feature implementation map
 
-Tool surface is 42 tools, registered from `internal/mcp/tools.go` + `tools_groups.go` + `tools_media.go` + `tools_privacy.go`.
+Tool surface is 44 tools, registered from `internal/mcp/tools.go` + `tools_groups.go` + `tools_media.go` + `tools_privacy.go` + `tools_actions.go`.
 
 1. **LID Resolution** — `internal/store/lid.go`. Normalises `@lid` JIDs to real phone numbers via the `whatsmeow_lid_map` table.
 2. **Sent message storage** — `internal/client/send.go` persists outgoing messages after `SendMessage` returns.
@@ -58,6 +58,8 @@ Tool surface is 42 tools, registered from `internal/mcp/tools.go` + `tools_group
 7. **Blocklist** — `internal/client/features_blocklist.go`. `GetBlocklist`, `BlockContact`, `UnblockContact` wrap whatsmeow's `GetBlocklist` / `UpdateBlocklist` (no `dhash` caching: each call fetches the full list). `get_blocklist` keeps its `DHash`/`JIDs`/`Contacts` JSON shape; phones come from whatsmeow's `BlocklistItem.PN`, falling back to the LID map.
 8. **Polls + contact cards + view-once flag** — `internal/client/features_media.go` (poll send / vote / tally + contact-card send paths) plus `internal/client/vcard.go` (vCard 3.0 synthesis when no override supplied) and the `ViewOnce` option plumbed through `SendMediaOptions` in `internal/client/send.go`. `SendPoll` now uses `wa.BuildPollCreation` so the required `MessageSecret` is attached (without it, votes cannot be decrypted — this was silently broken before). Vote ingest + tally live in `internal/client/events.go::handlePollVote` and `internal/store/poll.go` (the new `poll_votes` table + `messages.poll_options_json` column).
 9. **Presence / privacy / status message** — `internal/client/features_privacy.go`. `SendPresence` (own availability), `GetPrivacySettings` / `SetPrivacySetting` with strict enum validation, `SetStatusMessage` for the "About" text.
+10. **Read allowlist (default-deny)** — `internal/store/access.go` owns the `read_allowlist` table, the LID/phone expansion (`AllowedChats`, `IsChatAllowed`) and `ListAccessChats`. `ListChats`, `GetChat`, `ListMessages`, `GetMessageContext` and `SearchContacts` in `internal/store/queries.go` add the allowlist clause themselves, so no tool can bypass it. Live-API reads are filtered in the client (`ListJoinedGroups`, `GetBlocklist`, `GetGroupInfoJSON`, `GetGroupInviteLink` in `internal/client/`), and `internal/mcp/access.go` (`requireReadable`, `chatJIDArg`) gives the explicit `chat_jid: not on the read allowlist` refusals for `get_chat`, `list_messages`, `download_media` (and the media resource), `get_poll_results`, group info/link, `send_typing`, `mark_read`, `mark_chat_read`, `request_sync`. Read tool descriptions end with `readDesc`. Tests seed every fixture chat into the allowlist in `testdata/seed.sql`; allowlist tests clear it first.
+11. **Operator approval** — `internal/store/actions.go` holds `pending_actions` and the lifecycle (pending -> rejected | expired | executing -> executed | failed; `ClaimAction` is the one guarded UPDATE that lets an action run). `internal/mcp/approval.go` has `registerGated`, which wraps a typed handler: `prepare` validates and summarises, `execute` runs after approval. The 23 gated tools (incl. `reset_group_invite_link`) use it (send/edit/delete, group mutations, join, block/unblock, privacy, status); the summary names a chat only if it is readable. `Server.ApproveAction`/`RejectAction` are what `/approvals` calls; `get_action_status` is in `tools_actions.go` and withholds result text unless the action targets an allowlisted chat. The pages live in `internal/daemon/operator_handler.go` with templates `operator_base`/`approvals`/`access`, CSRF in `csrf.go` (shared with `/pair`, plus the Origin / Sec-Fetch-Site check). `serve` reads `WHATSAPP_MCP_APPROVAL_TTL` and `WHATSAPP_MCP_NOTIFY`.
 
 ## Versioning
 

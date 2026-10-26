@@ -2,14 +2,11 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
@@ -60,8 +57,7 @@ type pairHandlers struct {
 	pairCodeLimiter  *Limiter
 
 	// CSRF protection for the reset endpoint.
-	csrfMu    sync.Mutex
-	csrfToken string
+	csrf csrfGuard
 }
 
 // newPairHandlers constructs handlers with default rate limiters.
@@ -81,36 +77,6 @@ func newPairHandlers(cache *PairCache, reset resetter, coder pairCoder) *pairHan
 	}
 }
 
-// generateCSRFToken creates a new random CSRF token, stores it in the
-// handler, and returns it. Thread-safe.
-func (h *pairHandlers) generateCSRFToken() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback should never be reached in practice.
-		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
-	}
-	token := hex.EncodeToString(b)
-	h.csrfMu.Lock()
-	h.csrfToken = token
-	h.csrfMu.Unlock()
-	return token
-}
-
-// validCSRFToken checks whether the supplied token matches the stored one.
-// A match consumes the token (single-use). Thread-safe.
-func (h *pairHandlers) validCSRFToken(token string) bool {
-	h.csrfMu.Lock()
-	defer h.csrfMu.Unlock()
-	if h.csrfToken == "" || token == "" {
-		return false
-	}
-	ok := h.csrfToken == token
-	if ok {
-		h.csrfToken = "" // single-use: consume after validation
-	}
-	return ok
-}
-
 func (h *pairHandlers) mount(mux *http.ServeMux) {
 	mux.HandleFunc("/pair", h.handlePairPage)
 	mux.HandleFunc("/pair/qr.png", h.handlePairQR)
@@ -126,7 +92,7 @@ func (h *pairHandlers) handlePairPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data := pairPageData{
-		CSRFToken: h.generateCSRFToken(),
+		CSRFToken: h.csrf.generate(),
 	}
 	if h.cache.Paired() {
 		if err := pairedTmpl.Execute(w, data); err != nil {
@@ -171,7 +137,7 @@ func (h *pairHandlers) handlePairReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate the CSRF token from the form submission.
-	if !h.validCSRFToken(r.FormValue("csrf_token")) {
+	if !h.csrf.valid(r.FormValue("csrf_token")) {
 		http.Error(w, "invalid or missing CSRF token", http.StatusForbidden)
 		return
 	}
@@ -229,7 +195,7 @@ func (h *pairHandlers) handlePairCode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reuse the CSRF token minted on the /pair page so a drive-by POST
 	// cannot request codes on the user's behalf.
-	if !h.validCSRFToken(r.FormValue("csrf_token")) {
+	if !h.csrf.valid(r.FormValue("csrf_token")) {
 		http.Error(w, "invalid or missing CSRF token", http.StatusForbidden)
 		return
 	}

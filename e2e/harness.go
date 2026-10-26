@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
 
 // harness runs ./bin/whatsapp-mcp serve on an OS-assigned loopback port
@@ -26,11 +28,14 @@ type harness struct {
 	addr string
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness starts a daemon on a fresh store. Every JID in allowRead is put on
+// the read allowlist first, because the default is that nothing is readable.
+func newHarness(t *testing.T, allowRead ...string) *harness {
 	t.Helper()
 	repo := repoRoot(t)
 	bin := filepath.Join(repo, "bin", "whatsapp-mcp")
 	storeDir := t.TempDir()
+	seedAllowlist(t, storeDir, allowRead)
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
@@ -56,6 +61,24 @@ func newHarness(t *testing.T) *harness {
 
 	h.waitForReady(5 * time.Second)
 	return h
+}
+
+// seedAllowlist writes the read allowlist before the daemon opens the store.
+func seedAllowlist(t *testing.T, storeDir string, jids []string) {
+	t.Helper()
+	if len(jids) == 0 {
+		return
+	}
+	st, err := store.Open(storeDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	for _, jid := range jids {
+		if err := st.AddReadAllowlist(context.Background(), jid); err != nil {
+			t.Fatalf("allowlist %s: %v", jid, err)
+		}
+	}
 }
 
 func freePort(t *testing.T) int {

@@ -40,10 +40,13 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		page = 0
 	}
 
-	var (
-		whereClauses []string
-		args         []any
-	)
+	allowed, err := s.AllowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowedSQL, allowedArgs := allowed.clause("messages.chat_jid")
+	whereClauses := []string{allowedSQL}
+	args := allowedArgs
 
 	if !params.After.IsZero() {
 		whereClauses = append(whereClauses, "messages.timestamp > ?")
@@ -69,10 +72,8 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 	var b strings.Builder
 	b.WriteString("SELECT " + listMessageColumns + " FROM messages")
 	b.WriteString(" JOIN chats ON messages.chat_jid = chats.jid")
-	if len(whereClauses) > 0 {
-		b.WriteString(" WHERE ")
-		b.WriteString(strings.Join(whereClauses, " AND "))
-	}
+	b.WriteString(" WHERE ")
+	b.WriteString(strings.Join(whereClauses, " AND "))
 	b.WriteString(" ORDER BY messages.timestamp DESC")
 	b.WriteString(" LIMIT ? OFFSET ?")
 
@@ -136,9 +137,14 @@ func (s *Store) ListChats(ctx context.Context, query string, limit, page int, in
 	var b strings.Builder
 	b.WriteString(chatSelectSQL("chats", includeLastMessage))
 
-	var args []any
+	allowed, err := s.AllowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowedSQL, args := allowed.clause("chats.jid")
+	b.WriteString(" WHERE " + allowedSQL)
 	if query != "" {
-		b.WriteString(" WHERE (LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
+		b.WriteString(" AND (LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
 		args = append(args, "%"+query+"%", "%"+query+"%")
 	}
 
@@ -174,11 +180,17 @@ func (s *Store) ListChats(ctx context.Context, query string, limit, page int, in
 
 // GetChat returns a single chat by JID. Returns (nil, nil) when not found.
 func (s *Store) GetChat(ctx context.Context, jid string, includeLastMessage bool) (*Chat, error) {
+	allowed, err := s.AllowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowedSQL, allowedArgs := allowed.clause("c.jid")
+
 	var b strings.Builder
 	b.WriteString(chatSelectSQL("c", includeLastMessage))
-	b.WriteString(" WHERE c.jid = ?")
+	b.WriteString(" WHERE c.jid = ? AND " + allowedSQL)
 
-	row := s.db.QueryRowContext(ctx, b.String(), jid)
+	row := s.db.QueryRowContext(ctx, b.String(), append([]any{jid}, allowedArgs...)...)
 	c, err := scanChatRow(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -193,8 +205,14 @@ func (s *Store) GetChat(ctx context.Context, jid string, includeLastMessage bool
 // SearchContacts does a LIKE search over chats (excluding groups) and the
 // synced whatsmeow_contacts address book, and returns up to 50 contacts
 // ordered by name, jid. Address-book names win over chat names, which for
-// 1:1 chats are often just the bare phone number.
+// 1:1 chats are often just the bare phone number. Only contacts whose direct
+// chat is on the read allowlist are returned.
 func (s *Store) SearchContacts(ctx context.Context, query string) ([]Contact, error) {
+	allowed, err := s.AllowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowedSQL, allowedArgs := allowed.clause("jid")
 	pattern := "%" + query + "%"
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT jid, name
@@ -202,8 +220,9 @@ func (s *Store) SearchContacts(ctx context.Context, query string) ([]Contact, er
 		WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
 		  AND jid NOT LIKE '%@g.us'
 		  AND jid NOT LIKE '%@lid'
+		  AND `+allowedSQL+`
 		ORDER BY name, jid
-		LIMIT 50`, pattern, pattern)
+		LIMIT 50`, append([]any{pattern, pattern}, allowedArgs...)...)
 	if err != nil {
 		return nil, fmt.Errorf("search contacts: %w", err)
 	}
@@ -237,7 +256,7 @@ func (s *Store) SearchContacts(ctx context.Context, query string) ([]Contact, er
 		}
 	}
 	for jid, name := range names {
-		if seen[jid] {
+		if seen[jid] || !allowed.Has(jid) {
 			continue
 		}
 		result = append(result, Contact{PhoneNumber: jidUser(jid), Name: name, JID: jid})
@@ -255,13 +274,19 @@ func (s *Store) SearchContacts(ctx context.Context, query string) ([]Contact, er
 }
 
 // GetMessageContext returns the target message together with before/after
-// windows from the same chat.
+// windows from the same chat. A message in a chat that is not on the read
+// allowlist is reported as not found.
 func (s *Store) GetMessageContext(ctx context.Context, messageID string, before, after int) (*MessageContext, error) {
+	allowed, err := s.AllowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowedSQL, allowedArgs := allowed.clause("messages.chat_jid")
 	row := s.db.QueryRowContext(ctx, `
 		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
-		WHERE messages.id = ?`, messageID)
+		WHERE messages.id = ? AND `+allowedSQL, append([]any{messageID}, allowedArgs...)...)
 
 	var (
 		ts        time.Time
@@ -276,7 +301,7 @@ func (s *Store) GetMessageContext(ctx context.Context, messageID string, before,
 	)
 	if err := row.Scan(&ts, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &msgChat, &mediaType); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("message with ID %s not found", messageID)
+			return nil, fmt.Errorf("message with ID %s not found (or its chat is not on the read allowlist)", messageID)
 		}
 		return nil, fmt.Errorf("get message context: %w", err)
 	}

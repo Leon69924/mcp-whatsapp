@@ -21,7 +21,7 @@ func (s *Server) registerPrivacyTools() {
 
 func (s *Server) registerGetBlocklist() {
 	tool := mcp.NewTool("get_blocklist",
-		mcp.WithDescription("Fetch the paired user's current WhatsApp blocklist from the server. Read-only; blocked contacts are not notified by this call. Use block_contact / unblock_contact to mutate the list. Returns JSON with the blocked JIDs (now usually @lid) plus a Contacts list pairing each JID with its phone number where the LID mapping is known."),
+		mcp.WithDescription(readDesc("Fetch the paired user's current WhatsApp blocklist from the server. Read-only; blocked contacts are not notified by this call. Use block_contact / unblock_contact to mutate the list. Returns JSON with the blocked JIDs (now usually @lid) plus a Contacts list pairing each JID with its phone number where the LID mapping is known.")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -42,42 +42,48 @@ type blocklistMutationArgs struct {
 
 func (s *Server) registerBlockContact() {
 	tool := mcp.NewTool("block_contact",
-		mcp.WithDescription("Block a contact so they can no longer send the paired user messages or see your last seen, profile photo, or status; the blocked contact is not explicitly notified but will see undelivered messages on their side. Idempotent if already blocked. Reversible via unblock_contact. Returns the plain-text string `Blocked <jid>`."),
+		mcp.WithDescription(queuedDesc("Block a contact so they can no longer send the paired user messages or see your last seen, profile photo, or status; the blocked contact is not explicitly notified but will see undelivered messages on their side. Idempotent if already blocked. Reversible via unblock_contact. Returns the plain-text string `Blocked <jid>`.")),
 		mcp.WithString("jid", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a blocklistMutationArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("jid", a.JID); r != nil {
-			return r, nil
-		}
-		if err := s.client.BlockContact(ctx, a.JID); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("Blocked %s", a.JID)), nil
-	}))
+	registerGated(s, tool, gatedTool[blocklistMutationArgs]{
+		prepare: func(_ context.Context, a blocklistMutationArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareContact(a.JID)
+			return target, "block contact", reject
+		},
+		execute: func(ctx context.Context, a blocklistMutationArgs) (*mcp.CallToolResult, error) {
+			if err := s.client.BlockContact(ctx, a.JID); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Blocked %s", a.JID)), nil
+		},
+	})
 }
 
 func (s *Server) registerUnblockContact() {
 	tool := mcp.NewTool("unblock_contact",
-		mcp.WithDescription("Unblock a previously blocked contact, restoring their ability to message the paired user and see your last seen/profile/status; the contact is not notified. Idempotent if already unblocked. Reversible via block_contact. Use get_blocklist to see who is currently blocked. Returns the plain-text string `Unblocked <jid>`."),
+		mcp.WithDescription(queuedDesc("Unblock a previously blocked contact, restoring their ability to message the paired user and see your last seen/profile/status; the contact is not notified. Idempotent if already unblocked. Reversible via block_contact. Use get_blocklist to see who is currently blocked. Returns the plain-text string `Unblocked <jid>`.")),
 		mcp.WithString("jid", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a blocklistMutationArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("jid", a.JID); r != nil {
-			return r, nil
-		}
-		if err := s.client.UnblockContact(ctx, a.JID); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("Unblocked %s", a.JID)), nil
-	}))
+	registerGated(s, tool, gatedTool[blocklistMutationArgs]{
+		prepare: func(_ context.Context, a blocklistMutationArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareContact(a.JID)
+			return target, "unblock contact", reject
+		},
+		execute: func(ctx context.Context, a blocklistMutationArgs) (*mcp.CallToolResult, error) {
+			if err := s.client.UnblockContact(ctx, a.JID); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Unblocked %s", a.JID)), nil
+		},
+	})
 }
 
 type sendPresenceArgs struct {
@@ -142,7 +148,7 @@ type setPrivacySettingArgs struct {
 
 func (s *Server) registerSetPrivacySetting() {
 	tool := mcp.NewTool("set_privacy_setting",
-		mcp.WithDescription("Change a single WhatsApp privacy knob (read-receipts, last-seen, online, group-add, etc.) for the paired account; takes effect immediately and may change who can see your activity or contact you. Reversible by calling again with the previous value (capture it via get_privacy_settings first). Not every name/value combination is valid — WhatsApp rejects invalid combinations server-side. Returns a JSON document echoing the updated settings."),
+		mcp.WithDescription(queuedDesc("Change a single WhatsApp privacy knob (read-receipts, last-seen, online, group-add, etc.) for the paired account; takes effect immediately and may change who can see your activity or contact you. Reversible by calling again with the previous value (capture it via get_privacy_settings first). Not every name/value combination is valid — WhatsApp rejects invalid combinations server-side. Returns a JSON document echoing the updated settings.")),
 		mcp.WithString("name", mcp.Required(), mcp.Enum(privacySettingNames...), mcp.Description("privacy knob to change; one of the WhatsApp setting names (e.g. `last`, `readreceipts`, `groupadd`, `online`)")),
 		mcp.WithString("value", mcp.Required(), mcp.Enum(privacySettingValues...), mcp.Description("new value; one of the WhatsApp privacy values (e.g. `all`, `contacts`, `none`, `match_last_seen`)")),
 		mcp.WithReadOnlyHintAnnotation(false),
@@ -150,19 +156,24 @@ func (s *Server) registerSetPrivacySetting() {
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a setPrivacySettingArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("name", a.Name); r != nil {
-			return r, nil
-		}
-		if r := requireNonEmpty("value", a.Value); r != nil {
-			return r, nil
-		}
-		js, err := s.client.SetPrivacySetting(ctx, a.Name, a.Value)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText(js), nil
-	}))
+	registerGated(s, tool, gatedTool[setPrivacySettingArgs]{
+		prepare: func(_ context.Context, a setPrivacySettingArgs) (string, string, *mcp.CallToolResult) {
+			if r := requireNonEmpty("name", a.Name); r != nil {
+				return "", "", r
+			}
+			if r := requireNonEmpty("value", a.Value); r != nil {
+				return "", "", r
+			}
+			return "", fmt.Sprintf("set privacy %q to %q", a.Name, a.Value), nil
+		},
+		execute: func(ctx context.Context, a setPrivacySettingArgs) (*mcp.CallToolResult, error) {
+			js, err := s.client.SetPrivacySetting(ctx, a.Name, a.Value)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(js), nil
+		},
+	})
 }
 
 type setStatusMessageArgs struct {
@@ -171,17 +182,35 @@ type setStatusMessageArgs struct {
 
 func (s *Server) registerSetStatusMessage() {
 	tool := mcp.NewTool("set_status_message",
-		mcp.WithDescription("Update the paired user's WhatsApp profile `About` text; contacts permitted by privacy settings see the new text on the profile screen. Reversible by calling again with the previous text or with an empty string to clear. Note: this is the static profile About line, not the temporary `Status` story feed. Returns a JSON object `{success, message}`."),
+		mcp.WithDescription(queuedDesc("Update the paired user's WhatsApp profile `About` text; contacts permitted by privacy settings see the new text on the profile screen. Reversible by calling again with the previous text or with an empty string to clear. Note: this is the static profile About line, not the temporary `Status` story feed. Returns a JSON object `{success, message}`.")),
 		mcp.WithString("text", mcp.Required(), mcp.Description("new About text; pass an empty string to clear")),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a setStatusMessageArgs) (*mcp.CallToolResult, error) {
-		if err := s.client.SetStatusMessage(ctx, a.Text); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return resultJSON(map[string]any{"success": true, "message": "Status message updated"})
-	}))
+	registerGated(s, tool, gatedTool[setStatusMessageArgs]{
+		prepare: func(_ context.Context, a setStatusMessageArgs) (string, string, *mcp.CallToolResult) {
+			return "", "set About text to " + previewText(a.Text), nil
+		},
+		execute: func(ctx context.Context, a setStatusMessageArgs) (*mcp.CallToolResult, error) {
+			if err := s.client.SetStatusMessage(ctx, a.Text); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return resultJSON(map[string]any{"success": true, "message": "Status message updated"})
+		},
+	})
+}
+
+// prepareContact validates the contact argument of a blocklist tool and returns
+// its canonical JID.
+func prepareContact(jid string) (string, *mcp.CallToolResult) {
+	if r := requireNonEmpty("jid", jid); r != nil {
+		return "", r
+	}
+	target, err := chatJIDArg("jid", jid)
+	if err != nil {
+		return "", mcp.NewToolResultError(err.Error())
+	}
+	return target, nil
 }

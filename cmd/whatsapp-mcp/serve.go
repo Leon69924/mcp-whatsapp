@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 	"github.com/sealjay/mcp-whatsapp/internal/daemon"
@@ -111,10 +112,16 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		return 1
 	}
 
-	mcpServer := mcpsrv.NewServer(c, d.Cache())
+	approvals, err := resolveApprovalConfig("http://"+addr, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
+	mcpServer := mcpsrv.NewServer(c, d.Cache(), mcpsrv.WithApprovals(approvals))
 	d.SetMCPMount(mcpServer.AttachHTTP)
+	d.SetOperator(mcpServer, st)
 
-	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair)\n", addr)
+	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair, approvals at /approvals, read access at /access)\n", addr)
 	if !c.IsLoggedIn() {
 		fmt.Fprintf(os.Stderr, "unpaired: open http://%s/pair to scan QR\n", addr)
 	}
@@ -123,6 +130,29 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveApprovalConfig reads the approval-queue settings from the environment:
+// WHATSAPP_MCP_APPROVAL_TTL (a Go duration, default 24h) and WHATSAPP_MCP_NOTIFY
+// (`1` raises a desktop notification per queued action). baseURL is the
+// daemon's own origin, used for the approve_url handed to the model.
+func resolveApprovalConfig(baseURL string, getenv func(string) string) (mcpsrv.ApprovalConfig, error) {
+	cfg := mcpsrv.ApprovalConfig{
+		TTL:     mcpsrv.DefaultApprovalTTL,
+		Notify:  getenv("WHATSAPP_MCP_NOTIFY") == "1",
+		BaseURL: baseURL,
+	}
+	if raw := getenv("WHATSAPP_MCP_APPROVAL_TTL"); raw != "" {
+		ttl, err := time.ParseDuration(raw)
+		if err != nil {
+			return mcpsrv.ApprovalConfig{}, fmt.Errorf("WHATSAPP_MCP_APPROVAL_TTL: invalid duration %q (use a Go duration such as 24h or 90m): %w", raw, err)
+		}
+		if ttl <= 0 {
+			return mcpsrv.ApprovalConfig{}, fmt.Errorf("WHATSAPP_MCP_APPROVAL_TTL: must be positive, got %q", raw)
+		}
+		cfg.TTL = ttl
+	}
+	return cfg, nil
 }
 
 // resolveAddr applies the -addr / WHATSAPP_MCP_ADDR / default precedence.

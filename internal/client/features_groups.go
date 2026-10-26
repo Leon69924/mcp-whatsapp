@@ -15,6 +15,10 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+// errChatNotReadable refuses a live read of a chat that is not on the read
+// allowlist.
+var errChatNotReadable = errors.New("chat_jid: not on the read allowlist; the operator manages it at /access")
+
 // parseParticipantJIDs batch-parses a slice of phone/JID strings.
 func parseParticipantJIDs(raws []string) ([]types.JID, error) {
 	out := make([]types.JID, len(raws))
@@ -70,7 +74,8 @@ func (c *Client) LeaveGroup(ctx context.Context, chatJID string) error {
 	return nil
 }
 
-// ListJoinedGroups returns JSON of all groups the user is in.
+// ListJoinedGroups returns JSON of the groups the user is in that are on the
+// read allowlist.
 func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 	if !c.wa.IsConnected() {
 		return "", errors.New("not connected to WhatsApp")
@@ -79,7 +84,17 @@ func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list joined groups: %w", err)
 	}
-	b, err := json.Marshal(groups)
+	allowed, err := c.store.AllowedChats(ctx)
+	if err != nil {
+		return "", err
+	}
+	readable := make([]*types.GroupInfo, 0, len(groups))
+	for _, g := range groups {
+		if allowed.Has(g.JID.String()) {
+			readable = append(readable, g)
+		}
+	}
+	b, err := json.Marshal(readable)
 	if err != nil {
 		return "", fmt.Errorf("marshal groups: %w", err)
 	}
@@ -94,6 +109,13 @@ func (c *Client) GetGroupInfoJSON(ctx context.Context, chatJID string) (string, 
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
 		return "", fmt.Errorf("invalid chat JID: %w", err)
+	}
+	allowed, err := c.store.IsChatAllowed(ctx, jid.String())
+	if err != nil {
+		return "", fmt.Errorf("chat_jid: read allowlist lookup failed: %w", err)
+	}
+	if !allowed {
+		return "", errChatNotReadable
 	}
 	info, err := c.wa.GetGroupInfo(ctx, jid)
 	if err != nil {
@@ -560,6 +582,13 @@ func (c *Client) GetGroupInviteLink(ctx context.Context, chatJID string, reset b
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
 		return "", fmt.Errorf("invalid chat JID: %w", err)
+	}
+	allowed, err := c.store.IsChatAllowed(ctx, jid.String())
+	if err != nil {
+		return "", fmt.Errorf("chat_jid: read allowlist lookup failed: %w", err)
+	}
+	if !allowed {
+		return "", errChatNotReadable
 	}
 	link, err := c.wa.GetGroupInviteLink(ctx, jid, reset)
 	if err != nil {

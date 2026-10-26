@@ -14,6 +14,7 @@ var expectedToolNames = []string{
 	"delete_message",
 	"download_media",
 	"edit_message",
+	"get_action_status",
 	"get_blocklist",
 	"get_chat",
 	"get_group_info",
@@ -32,6 +33,7 @@ var expectedToolNames = []string{
 	"mark_read",
 	"pairing_status",
 	"request_sync",
+	"reset_group_invite_link",
 	"search_contacts",
 	"send_audio_message",
 	"send_contact_card",
@@ -116,7 +118,7 @@ func TestNewServer_RegistersAllTools(t *testing.T) {
 
 func TestNewServer_ToolCount(t *testing.T) {
 	s := NewServer(nil, nil)
-	const want = 42
+	const want = 44
 	if got := len(s.MCP().ListTools()); got != want {
 		t.Errorf("tool count = %d, want %d", got, want)
 	}
@@ -141,6 +143,7 @@ func TestToolsByDomain(t *testing.T) {
 		"tools_groups.go":  {"create_group", "leave_group"},
 		"tools_media.go":   {"send_poll", "send_contact_card"},
 		"tools_privacy.go": {"get_blocklist", "send_presence"},
+		"tools_actions.go": {"get_action_status"},
 	}
 
 	for file, names := range domains {

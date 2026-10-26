@@ -24,7 +24,7 @@ func TestSendFileRejectsOutOfRootPath(t *testing.T) {
 }
 
 func TestDownloadMediaRejectsOutOfRootOutputPath(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, "00000000@s.whatsapp.net")
 	h.initializeMCP()
 
 	res := h.callTool("download_media", map[string]any{
@@ -36,5 +36,31 @@ func TestDownloadMediaRejectsOutOfRootOutputPath(t *testing.T) {
 	// than an MCP tool error, so check the body for the rejection string.
 	if !strings.Contains(res.Text, "allowed root") {
 		t.Fatalf("error should mention allowed root, got %q", res.Text)
+	}
+}
+
+func TestDownloadMediaRefusesChatOffTheAllowlist(t *testing.T) {
+	h := newHarness(t)
+	h.initializeMCP()
+
+	res := h.callTool("download_media", map[string]any{
+		"message_id": "any",
+		"chat_jid":   "00000000@s.whatsapp.net",
+	})
+	if !res.IsError || !strings.Contains(res.Text, "read allowlist") {
+		t.Fatalf("expected a read-allowlist refusal, got %+v", res)
+	}
+}
+
+func TestSendMessageIsQueuedForApproval(t *testing.T) {
+	h := newHarness(t)
+	h.initializeMCP()
+
+	res := h.callTool("send_message", map[string]any{
+		"recipient": "00000000",
+		"message":   "hello",
+	})
+	if res.IsError || !strings.Contains(res.Text, "pending_approval") {
+		t.Fatalf("expected a pending_approval result, got %+v", res)
 	}
 }

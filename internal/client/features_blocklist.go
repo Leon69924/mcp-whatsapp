@@ -8,6 +8,8 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+
+	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
 
 type blockedContact struct {
@@ -37,7 +39,20 @@ func blocklistJSON(list *types.Blocklist, toPhone func(string) string) any {
 	}{list.DHash, jids, contacts}
 }
 
-// GetBlocklist returns the user's current blocklist as JSON.
+// readableBlocklist drops the entries whose chat is not allowlisted. Either
+// addressing form of a blocked person counts.
+func readableBlocklist(list *types.Blocklist, allowed store.AllowedChats) *types.Blocklist {
+	readable := &types.Blocklist{AddressingMode: list.AddressingMode, DHash: list.DHash}
+	for _, item := range list.Items {
+		if allowed.Has(item.LID.String()) || (item.PN.User != "" && allowed.Has(item.PN.String())) {
+			readable.Items = append(readable.Items, item)
+		}
+	}
+	return readable
+}
+
+// GetBlocklist returns the user's current blocklist as JSON, limited to the
+// entries whose chat is on the read allowlist.
 func (c *Client) GetBlocklist(ctx context.Context) (string, error) {
 	if !c.wa.IsConnected() {
 		return "", errors.New("not connected to WhatsApp")
@@ -46,7 +61,11 @@ func (c *Client) GetBlocklist(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get blocklist: %w", err)
 	}
-	b, err := json.Marshal(blocklistJSON(list, c.store.ResolveJIDToPhone))
+	allowed, err := c.store.AllowedChats(ctx)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(blocklistJSON(readableBlocklist(list, allowed), c.store.ResolveJIDToPhone))
 	if err != nil {
 		return "", fmt.Errorf("marshal blocklist: %w", err)
 	}

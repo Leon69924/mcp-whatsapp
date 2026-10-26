@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -25,7 +27,7 @@ type sendPollArgs struct {
 
 func (s *Server) registerSendPoll() {
 	tool := mcp.NewTool("send_poll",
-		mcp.WithDescription("Send a new WhatsApp poll message with 2 to 32 options; recipients see a votable poll card and an outgoing row plus poll metadata is persisted locally so votes can be tallied. Reversible via delete_message (revoke). Use send_poll_vote to cast votes and get_poll_results to read tallies. Returns a JSON object `{Success, Message, ID}` where `ID` is the poll message ID on success."),
+		mcp.WithDescription(queuedDesc("Send a new WhatsApp poll message with 2 to 32 options; recipients see a votable poll card and an outgoing row plus poll metadata is persisted locally so votes can be tallied. Reversible via delete_message (revoke). Use send_poll_vote to cast votes and get_poll_results to read tallies. Returns a JSON object `{Success, Message, ID}` where `ID` is the poll message ID on success.")),
 		mcp.WithString("recipient", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithString("question", mcp.Required(), mcp.Description("poll question text shown above the options")),
 		mcp.WithArray("options", mcp.Required(), mcp.Items(map[string]any{"type": "string"}), mcp.Description("poll option labels; must contain between 2 and 32 entries")),
@@ -35,22 +37,30 @@ func (s *Server) registerSendPoll() {
 		mcp.WithIdempotentHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a sendPollArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("recipient", a.Recipient); r != nil {
-			return r, nil
-		}
-		if r := requireNonEmpty("question", a.Question); r != nil {
-			return r, nil
-		}
-		if len(a.Options) < 2 {
-			return mcp.NewToolResultError("options: need at least 2 entries"), nil
-		}
-		if len(a.Options) > 32 {
-			return mcp.NewToolResultError("options: max 32 entries"), nil
-		}
-		r := s.client.SendPoll(ctx, a.Recipient, a.Question, a.Options, a.SelectableCount)
-		return resultJSON(r)
-	}))
+	registerGated(s, tool, gatedTool[sendPollArgs]{
+		prepare: func(ctx context.Context, a sendPollArgs) (string, string, *mcp.CallToolResult) {
+			if r := requireNonEmpty("recipient", a.Recipient); r != nil {
+				return "", "", r
+			}
+			if r := requireNonEmpty("question", a.Question); r != nil {
+				return "", "", r
+			}
+			if len(a.Options) < 2 {
+				return "", "", mcp.NewToolResultError("options: need at least 2 entries")
+			}
+			if len(a.Options) > 32 {
+				return "", "", mcp.NewToolResultError("options: max 32 entries")
+			}
+			target, reject := s.prepareRecipient(ctx, a.Recipient, false)
+			if reject != nil {
+				return "", "", reject
+			}
+			return target, fmt.Sprintf("poll %s with %d options", previewText(a.Question), len(a.Options)), nil
+		},
+		execute: func(ctx context.Context, a sendPollArgs) (*mcp.CallToolResult, error) {
+			return sendOutcome(s.client.SendPoll(ctx, a.Recipient, a.Question, a.Options, a.SelectableCount))
+		},
+	})
 }
 
 type sendPollVoteArgs struct {
@@ -61,7 +71,7 @@ type sendPollVoteArgs struct {
 
 func (s *Server) registerSendPollVote() {
 	tool := mcp.NewTool("send_poll_vote",
-		mcp.WithDescription("Cast or re-cast a vote on a previously-seen poll; each call replaces the caller's prior vote on that poll, and the new tally is broadcast to the chat. Reversible by calling again with the desired option set (or an empty list to clear). Prerequisite: the poll must be in the local cache, i.e. send_poll was used or we received the poll via sync. Returns a JSON object `{Success, Message, ID}` where `ID` is the vote message ID."),
+		mcp.WithDescription(queuedDesc("Cast or re-cast a vote on a previously-seen poll; each call replaces the caller's prior vote on that poll, and the new tally is broadcast to the chat. Reversible by calling again with the desired option set (or an empty list to clear). Prerequisite: the poll must be in the local cache, i.e. send_poll was used or we received the poll via sync. Returns a JSON object `{Success, Message, ID}` where `ID` is the vote message ID.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("poll_message_id", mcp.Required(), mcp.Description("WhatsApp message ID of the poll to vote on (use `ID` returned by send_poll, or `message_id` from list_messages)")),
 		mcp.WithArray("options", mcp.Required(), mcp.Items(map[string]any{"type": "string"}), mcp.Description("option labels to pick; must match the poll's option text exactly, between 1 and 32 entries")),
@@ -70,22 +80,27 @@ func (s *Server) registerSendPollVote() {
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a sendPollVoteArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("chat_jid", a.ChatJID); r != nil {
-			return r, nil
-		}
-		if r := requireNonEmpty("poll_message_id", a.PollMessageID); r != nil {
-			return r, nil
-		}
-		if len(a.Options) == 0 {
-			return mcp.NewToolResultError("options: required"), nil
-		}
-		if len(a.Options) > 32 {
-			return mcp.NewToolResultError("options: max 32 entries"), nil
-		}
-		r := s.client.SendPollVote(ctx, a.ChatJID, a.PollMessageID, a.Options)
-		return resultJSON(r)
-	}))
+	registerGated(s, tool, gatedTool[sendPollVoteArgs]{
+		prepare: func(_ context.Context, a sendPollVoteArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareChat(a.ChatJID)
+			if reject != nil {
+				return "", "", reject
+			}
+			if r := requireNonEmpty("poll_message_id", a.PollMessageID); r != nil {
+				return "", "", r
+			}
+			if len(a.Options) == 0 {
+				return "", "", mcp.NewToolResultError("options: required")
+			}
+			if len(a.Options) > 32 {
+				return "", "", mcp.NewToolResultError("options: max 32 entries")
+			}
+			return target, "vote on poll " + a.PollMessageID + ": " + strings.Join(a.Options, ", "), nil
+		},
+		execute: func(ctx context.Context, a sendPollVoteArgs) (*mcp.CallToolResult, error) {
+			return sendOutcome(s.client.SendPollVote(ctx, a.ChatJID, a.PollMessageID, a.Options))
+		},
+	})
 }
 
 type getPollResultsArgs struct {
@@ -95,7 +110,7 @@ type getPollResultsArgs struct {
 
 func (s *Server) registerGetPollResults() {
 	tool := mcp.NewTool("get_poll_results",
-		mcp.WithDescription(offlineSafePrefix+"Return the current vote tally for a cached poll. Read-only; no side effects. Zero-vote options are included so the response always lists every original option. Returns a JSON object `{poll_message_id, chat_jid, tally}` where `tally` is `option_label -> vote_count`."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"Return the current vote tally for a cached poll. Read-only; no side effects. Zero-vote options are included so the response always lists every original option. Returns a JSON object `{poll_message_id, chat_jid, tally}` where `tally` is `option_label -> vote_count`.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("poll_message_id", mcp.Required(), mcp.Description("WhatsApp message ID of the poll to tally (use `ID` from send_poll, or `message_id` from list_messages)")),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -108,6 +123,9 @@ func (s *Server) registerGetPollResults() {
 			return r, nil
 		}
 		if r := requireNonEmpty("poll_message_id", a.PollMessageID); r != nil {
+			return r, nil
+		}
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
 			return r, nil
 		}
 		r, err := s.client.GetPollResults(ctx, a.ChatJID, a.PollMessageID)
@@ -130,7 +148,7 @@ type sendContactCardArgs struct {
 
 func (s *Server) registerSendContactCard() {
 	tool := mcp.NewTool("send_contact_card",
-		mcp.WithDescription("Send a WhatsApp contact card; recipients see a tappable contact entry they can save to their address book and the outgoing message is persisted to the local cache. When `vcard` is omitted a minimal vCard 3.0 is synthesised from `name` + `phone`. Reversible via delete_message (revoke). Returns a JSON object `{Success, Message, ID}` where `ID` is the WhatsApp message ID on success."),
+		mcp.WithDescription(queuedDesc("Send a WhatsApp contact card; recipients see a tappable contact entry they can save to their address book and the outgoing message is persisted to the local cache. When `vcard` is omitted a minimal vCard 3.0 is synthesised from `name` + `phone`. Reversible via delete_message (revoke). Returns a JSON object `{Success, Message, ID}` where `ID` is the WhatsApp message ID on success.")),
 		mcp.WithString("recipient", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithString("name", mcp.Required(), mcp.Description("contact display name; also used as the FN in the synthesised vCard")),
 		mcp.WithString("phone", mcp.Description("phone number (digits preferred); embedded in the synthesised vCard when `vcard` is not supplied")),
@@ -140,14 +158,25 @@ func (s *Server) registerSendContactCard() {
 		mcp.WithIdempotentHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a sendContactCardArgs) (*mcp.CallToolResult, error) {
-		if r := requireNonEmpty("recipient", a.Recipient); r != nil {
-			return r, nil
-		}
-		if a.Name == "" && a.VCard == "" {
-			return mcp.NewToolResultError("name: required when vcard is not provided"), nil
-		}
-		r := s.client.SendContactCard(ctx, a.Recipient, a.Name, a.Phone, a.VCard)
-		return resultJSON(r)
-	}))
+	registerGated(s, tool, gatedTool[sendContactCardArgs]{
+		prepare: func(ctx context.Context, a sendContactCardArgs) (string, string, *mcp.CallToolResult) {
+			if r := requireNonEmpty("recipient", a.Recipient); r != nil {
+				return "", "", r
+			}
+			if a.Name == "" && a.VCard == "" {
+				return "", "", mcp.NewToolResultError("name: required when vcard is not provided")
+			}
+			target, reject := s.prepareRecipient(ctx, a.Recipient, false)
+			if reject != nil {
+				return "", "", reject
+			}
+			if a.VCard != "" {
+				return target, "contact card from a raw vCard", nil
+			}
+			return target, "contact card " + previewText(a.Name) + " " + previewText(a.Phone), nil
+		},
+		execute: func(ctx context.Context, a sendContactCardArgs) (*mcp.CallToolResult, error) {
+			return sendOutcome(s.client.SendContactCard(ctx, a.Recipient, a.Name, a.Phone, a.VCard))
+		},
+	})
 }

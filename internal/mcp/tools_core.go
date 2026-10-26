@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
 
@@ -39,6 +41,15 @@ func normalizeRecipientToChatJID(recipient string) string {
 		return canonical
 	}
 	return canonical + "@s.whatsapp.net"
+}
+
+// sendOutcome maps a send result to a tool result. A failed send is an error
+// result so an approved action that did not go out is recorded as failed.
+func sendOutcome(r client.SendResult) (*mcp.CallToolResult, error) {
+	if !r.Success {
+		return mcp.NewToolResultError(r.Message), nil
+	}
+	return resultJSON(r)
 }
 
 func parseTimestamp(s string) (time.Time, error) {

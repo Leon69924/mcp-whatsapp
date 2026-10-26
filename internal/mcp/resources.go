@@ -35,7 +35,7 @@ func (s *Server) registerResources() {
 	template := mcp.NewResourceTemplate(
 		mediaURITemplate,
 		"WhatsApp media",
-		mcp.WithTemplateDescription("Read the decrypted bytes of a WhatsApp media message (image, video, audio, document) as a base64-encoded blob. Fetches from WhatsApp's CDN on first read; subsequent reads hit the local cache. Pair with list_messages to discover media message IDs, or call download_media first if you want the JSON summary alongside."),
+		mcp.WithTemplateDescription("Read the decrypted bytes of a WhatsApp media message (image, video, audio, document) as a base64-encoded blob, for chats on the operator's read allowlist only. Fetches from WhatsApp's CDN on first read; subsequent reads hit the local cache. Pair with list_messages to discover media message IDs, or call download_media first if you want the JSON summary alongside."),
 	)
 	s.mcp.AddResourceTemplate(template, s.handleMediaResource)
 }
@@ -49,6 +49,9 @@ func (s *Server) handleMediaResource(ctx context.Context, req mcp.ReadResourceRe
 	chatJID, messageID, err := parseMediaURI(req.Params.URI)
 	if err != nil {
 		return nil, fmt.Errorf("invalid whatsapp media URI %q: %w", req.Params.URI, err)
+	}
+	if err := s.checkReadable(ctx, "chat_jid", chatJID); err != nil {
+		return nil, fmt.Errorf("read media %s: %w", req.Params.URI, err)
 	}
 	r := s.client.Download(ctx, messageID, chatJID, "")
 	if !r.Success {

@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
+	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
 
 // pairingCache is the minimal pairing-state surface pairing_status needs.
@@ -24,6 +25,13 @@ type Server struct {
 	client *client.Client
 	mcp    *server.MCPServer
 	cache  pairingCache
+	// store is the client's message cache; nil only when the server is built
+	// without a client (smoke and unit tests).
+	store     *store.Store
+	approvals ApprovalConfig
+	// executors maps each approval-gated tool to the handler that runs it once
+	// the operator approves a queued call.
+	executors map[string]executor
 }
 
 // NewServer constructs an MCP server with all tools registered against the
@@ -33,13 +41,25 @@ type Server struct {
 // -ldflags build version so the two cannot drift.
 var Version = "dev"
 
-func NewServer(c *client.Client, cache pairingCache) *Server {
+func NewServer(c *client.Client, cache pairingCache, opts ...Option) *Server {
 	mcpSrv := server.NewMCPServer(
 		"whatsapp",
 		Version,
 		server.WithToolCapabilities(true),
 	)
-	s := &Server{client: c, mcp: mcpSrv, cache: cache}
+	s := &Server{
+		client:    c,
+		mcp:       mcpSrv,
+		cache:     cache,
+		approvals: ApprovalConfig{TTL: DefaultApprovalTTL},
+		executors: map[string]executor{},
+	}
+	if c != nil {
+		s.store = c.Store()
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.registerTools()
 	s.registerResources()
 	return s

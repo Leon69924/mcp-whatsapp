@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Sealjay/mcp-whatsapp)](https://goreportcard.com/report/github.com/Sealjay/mcp-whatsapp)
 [![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![MCP](https://img.shields.io/badge/MCP-protocol-6366f1)](https://modelcontextprotocol.io/)
-[![42 tools](https://img.shields.io/badge/tools-42-blue)]()
+[![44 tools](https://img.shields.io/badge/tools-44-blue)]()
 [![whatsmeow](https://img.shields.io/badge/whatsmeow-multidevice-25D366?logo=whatsapp&logoColor=white)](https://github.com/tulir/whatsmeow)
 [![Sealjay/mcp-whatsapp MCP server](https://glama.ai/mcp/servers/Sealjay/mcp-whatsapp/badges/score.svg?)](https://glama.ai/mcp/servers/Sealjay/mcp-whatsapp)
 [![GitHub issues](https://img.shields.io/github/issues/Sealjay/mcp-whatsapp)](https://github.com/Sealjay/mcp-whatsapp/issues)
@@ -20,7 +20,7 @@ This started as a fork of [lharries/whatsapp-mcp](https://github.com/lharries/wh
 - **Sent-message storage** — outgoing messages are persisted locally so conversation history stays complete.
 - **Disappearing-message timers** — outgoing messages inherit the group chat's ephemeral timer automatically.
 - **Targeted history sync** — on-demand per-chat backfill via the `request_sync` tool.
-- **Extended tool surface** — 42 tools (see below): reactions, replies, edits, revoke, mark-read, typing, is-on-whatsapp, full group admin, blocklist, polls (create + vote + tally), contact cards, view-once flag, presence, privacy settings, and the profile "About" text.
+- **Extended tool surface** — 44 tools (see below): reactions, replies, edits, revoke, mark-read, typing, is-on-whatsapp, full group admin, blocklist, polls (create + vote + tally), contact cards, view-once flag, presence, privacy settings, and the profile "About" text.
 - **Single-instance enforcement** — a `flock(2)` on `store/.lock` prevents two `serve` processes racing on the same SQLite files.
 
 ## Setup
@@ -119,7 +119,7 @@ Clients then send `Authorization: Bearer $TOKEN`. The container binds loopback b
 ```
 cmd/whatsapp-mcp/       login / serve / smoke subcommands
 internal/client/        whatsmeow client wrapper (send, download, events, history, features)
-internal/daemon/        HTTP server, pairing state machine, /pair endpoints
+internal/daemon/        HTTP server, pairing state machine, /pair, /approvals and /access pages
 internal/mcp/           mark3labs/mcp-go v1 server + tool registrations
 internal/media/         ogg parsing, waveform synthesis, ffmpeg shell-out
 internal/security/      path allowlisting, filename sanitisation, log redaction
@@ -130,7 +130,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 
 ## Tools
 
-42 tools, grouped by purpose.
+44 tools, grouped by purpose.
 
 ### Read / query
 
@@ -181,7 +181,8 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 | `set_group_topic` | Change the group description; empty string clears it |
 | `set_group_announce` | Toggle announce-only mode (only admins can send) |
 | `set_group_locked` | Toggle locked mode (only admins can edit group metadata) |
-| `get_group_invite_link` | Get the invite link; `reset: true` revokes the previous link first |
+| `get_group_invite_link` | Read the current invite link (read-only) |
+| `reset_group_invite_link` | Revoke the invite link and mint a new one (queued for operator approval) |
 | `join_group_with_link` | Join a group via a `chat.whatsapp.com` URL or bare invite code |
 
 ### Blocklist
@@ -207,6 +208,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 |---|---|
 | `is_on_whatsapp` | Batch-check which phone numbers are registered on WhatsApp |
 | `get_status` | Report whether the bridge is connected and which account it's paired as |
+| `get_action_status` | Report whether an action queued for operator approval is pending, rejected, expired, executed or failed, with its result |
 | `pairing_status` | Report the device-pairing state as a structured `setup_state` envelope (`ready` / `awaiting_qr` + `qr_payload` / `error`) for programmatic supervisors that surface the linking QR |
 
 ### Deferred
@@ -217,9 +219,26 @@ Intentionally not exposed yet:
 - **Profile photo setter** — upstream whatsmeow doesn't expose a user-level setter.
 - **Approval-mode participants, communities, newsletters** — low-use surface, deferred.
 
+## Operator safeguards
+
+Two safeguards sit between the model and your account. Both are enforced by the daemon, not by the model's good behaviour.
+
+**Read allowlist (default: nothing is readable).** The model can read only the chats you allow. `messages.db` has a `read_allowlist` table; while it is empty, `list_chats`, `list_messages`, `get_chat`, `get_message_context`, `search_contacts`, `download_media`, the `whatsapp://media/...` resource, `get_poll_results`, `list_groups`, `get_group_info`, `get_group_invite_link` and `get_blocklist` return nothing, and a request for a specific chat fails with `chat_jid: not on the read allowlist`. The per-chat actions `send_typing`, `mark_read`, `mark_chat_read` and `request_sync` are refused the same way. The store queries themselves are filtered, so no tool can bypass it. A person's `@lid` and `@s.whatsapp.net` forms count as one chat. Account-level tools (`get_status`, `pairing_status`, `is_on_whatsapp`, `get_privacy_settings`, `send_presence`) are not affected. Manage the list at `http://127.0.0.1:8765/access`: every known chat with a search box, allowed chats first, and Allow / Remove buttons.
+
+**Approval for outbound and mutating actions.** These tools do not run when the model calls them: `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_reply`, `send_poll`, `send_poll_vote`, `send_contact_card`, `edit_message`, `delete_message`, `create_group`, `leave_group`, `reset_group_invite_link`, `update_group_participants`, `set_group_name`, `set_group_topic`, `set_group_announce`, `set_group_locked`, `join_group_with_link`, `block_contact`, `unblock_contact`, `set_privacy_setting` and `set_status_message`. The daemon validates the arguments, stores the call and answers `{status: "pending_approval", action_id, summary, approve_url}`. You approve or reject it at `http://127.0.0.1:8765/approvals`, which shows the full text, target chat and arguments. Only an approval runs the original handler, exactly once; rejected and expired actions never run. Approval does not bypass the send rate limiter. The model polls `get_action_status(action_id)` for the outcome; the result text is shown to it only when the action targets an allowlisted chat, otherwise just success or failure.
+
+| Variable | Effect |
+|---|---|
+| `WHATSAPP_MCP_APPROVAL_TTL` | How long a queued action stays approvable, as a Go duration (default `24h`). An invalid value stops `serve` at startup. |
+| `WHATSAPP_MCP_NOTIFY` | `1` runs `notify-send -a whatsapp-mcp "WhatsApp: approval needed" "<summary>"` for every queued action; failures are logged. |
+
+Both pages are server-rendered, accept state changes only as POST with a single-use CSRF token, and require both browser provenance headers (`Sec-Fetch-Site: same-origin` and an `Origin` naming the daemon's host), so a plain script request is refused. Without a bearer token every route, `/mcp` included, also refuses a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` on the bound port, which blocks DNS-rebinding pages. With `-allow-remote` they require the same bearer token as `/pair` and `/mcp`.
+
+**Limitation.** This guards against prompt injection arriving through MCP tool calls. It does not stop a process on the same machine from reaching the loopback UI: an agent with unrestricted local shell access can fetch the page, read the CSRF token, forge the provenance headers and approve its own actions. Do not run the daemon alongside agents that have unattended shell access, or restrict their access to the daemon's port.
+
 ## Limitations
 
-- **Prompt-injection risk:** as with many MCP servers, this one is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Prompt injection in incoming messages could lead to private data exfiltration — treat the tool surface accordingly.
+- **Prompt-injection risk:** as with many MCP servers, this one is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Prompt injection in incoming messages could lead to private data exfiltration — the read allowlist and approval queue (see [Operator safeguards](#operator-safeguards)) narrow that surface, and treat the rest accordingly.
 - **Message gaps:** see [Running the daemon](#running-the-daemon).
 - **Single instance per store:** only one `whatsapp-mcp serve` can hold the store lock. Parallel MCP clients must point at different `-store` directories (and therefore different paired sessions).
 - **Windows:** requires CGO and a C compiler — see [docs/windows.md](docs/windows.md).
