@@ -31,7 +31,7 @@ type searchContactsArgs struct {
 
 func (s *Server) registerSearchContacts() {
 	tool := mcp.NewTool("search_contacts",
-		mcp.WithDescription(offlineSafePrefix+"Search the cached WhatsApp contact list by case-insensitive substring of name or phone number. Read-only; no side effects. Use is_on_whatsapp to verify whether an unknown phone number is registered. Returns a JSON array of contact objects (each with JID, push name, full name, and phone)."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"Search the cached WhatsApp contact list by case-insensitive substring of name or phone number. Read-only; no side effects. Use is_on_whatsapp to verify whether an unknown phone number is registered. Returns a JSON array of contact objects (each with JID, push name, full name, and phone).")),
 		mcp.WithString("query", mcp.Required(), mcp.Description("case-insensitive substring to match against name or phone")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -39,7 +39,7 @@ func (s *Server) registerSearchContacts() {
 		mcp.WithOpenWorldHintAnnotation(false),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a searchContactsArgs) (*mcp.CallToolResult, error) {
-		contacts, err := s.client.Store().SearchContacts(ctx, a.Query)
+		contacts, err := s.store.SearchContacts(ctx, a.Query)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -64,7 +64,7 @@ type listMessagesArgs struct {
 
 func (s *Server) registerListMessages() {
 	tool := mcp.NewTool("list_messages",
-		mcp.WithDescription(offlineSafePrefix+"Search and page through cached WhatsApp messages, optionally filtering by chat, sender, time range, and substring; can include surrounding context messages. Read-only; no side effects. Use get_message_context to expand around a single known message ID, or request_sync to backfill missing history. Returns a human-readable formatted text block listing matching messages."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"Search and page through cached WhatsApp messages, optionally filtering by chat, sender, time range, and substring; can include surrounding context messages. Read-only; no side effects. Use get_message_context to expand around a single known message ID, or request_sync to backfill missing history. Returns a human-readable formatted text block listing matching messages.")),
 		mcp.WithString("after", mcp.Description("ISO-8601 UTC lower bound on message timestamp (inclusive)")),
 		mcp.WithString("before", mcp.Description("ISO-8601 UTC upper bound on message timestamp (inclusive)")),
 		mcp.WithString("sender_phone_number", mcp.Description("filter to messages sent by this phone or JID ("+jidDesc+")")),
@@ -81,6 +81,11 @@ func (s *Server) registerListMessages() {
 		mcp.WithOpenWorldHintAnnotation(false),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a listMessagesArgs) (*mcp.CallToolResult, error) {
+		if a.ChatJID != "" {
+			if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+				return r, nil
+			}
+		}
 		// Clamp parameters to server-side upper bounds.
 		limit := a.Limit
 		if limit > 100 {
@@ -118,11 +123,11 @@ func (s *Server) registerListMessages() {
 			}
 			params.Before = t
 		}
-		msgs, err := s.client.Store().ListMessages(ctx, params)
+		msgs, err := s.store.ListMessages(ctx, params)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return mcp.NewToolResultText(s.client.Store().FormatMessagesList(ctx, msgs, true)), nil
+		return mcp.NewToolResultText(s.store.FormatMessagesList(ctx, msgs, true)), nil
 	}))
 }
 
@@ -138,7 +143,7 @@ type listChatsArgs struct {
 
 func (s *Server) registerListChats() {
 	tool := mcp.NewTool("list_chats",
-		mcp.WithDescription(offlineSafePrefix+"List cached WhatsApp chats (1:1 and group), optionally filtered by name substring and sorted by recency or alphabetic name. Read-only; no side effects. Use get_chat for a single chat by JID, list_groups for groups only. Returns a JSON array of chat objects (each with JID, name, last-message metadata when requested)."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"List cached WhatsApp chats (1:1 and group), optionally filtered by name substring and sorted by recency or alphabetic name. Read-only; no side effects. Use get_chat for a single chat by JID, list_groups for groups only. Returns a JSON array of chat objects (each with JID, name, last-message metadata when requested).")),
 		mcp.WithString("query", mcp.Description("case-insensitive substring to match against chat name")),
 		mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("max chats to return (default 20)")),
 		mcp.WithNumber("page", mcp.DefaultNumber(0), mcp.Description("zero-based page index for paging through results (default 0)")),
@@ -155,7 +160,7 @@ func (s *Server) registerListChats() {
 			sortBy = "last_active"
 		}
 		include := a.IncludeLastMessage == nil || *a.IncludeLastMessage
-		chats, err := s.client.Store().ListChats(ctx, a.Query, a.Limit, a.Page, include, sortBy)
+		chats, err := s.store.ListChats(ctx, a.Query, a.Limit, a.Page, include, sortBy)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -172,7 +177,7 @@ type getChatArgs struct {
 
 func (s *Server) registerGetChat() {
 	tool := mcp.NewTool("get_chat",
-		mcp.WithDescription(offlineSafePrefix+"Fetch metadata for a single cached chat by JID. Read-only; no side effects. Use list_chats to discover chat JIDs, or get_group_info for live group metadata. Returns a JSON object describing the chat (JID, name, last-message metadata when requested), or the JSON literal `null` when the chat is not in the cache."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"Fetch metadata for a single cached chat by JID. Read-only; no side effects. Use list_chats to discover chat JIDs, or get_group_info for live group metadata. Returns a JSON object describing the chat (JID, name, last-message metadata when requested), or the JSON literal `null` when the chat is not in the cache.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithBoolean("include_last_message", mcp.DefaultBool(true), mcp.Description("if true, include the chat's most recent message in the result (defaults to true)")),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -181,8 +186,11 @@ func (s *Server) registerGetChat() {
 		mcp.WithOpenWorldHintAnnotation(false),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a getChatArgs) (*mcp.CallToolResult, error) {
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+			return r, nil
+		}
 		include := a.IncludeLastMessage == nil || *a.IncludeLastMessage
-		chat, err := s.client.Store().GetChat(ctx, a.ChatJID, include)
+		chat, err := s.store.GetChat(ctx, a.ChatJID, include)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -203,7 +211,7 @@ type getMessageContextArgs struct {
 
 func (s *Server) registerGetMessageContext() {
 	tool := mcp.NewTool("get_message_context",
-		mcp.WithDescription(offlineSafePrefix+"Fetch a specific cached message and the surrounding messages in its chat. Read-only; no side effects. Use list_messages for searching across many chats. Returns a JSON object with the target message and arrays of messages before and after it."),
+		mcp.WithDescription(readDesc(offlineSafePrefix+"Fetch a specific cached message and the surrounding messages in its chat. Read-only; no side effects. Use list_messages for searching across many chats. Returns a JSON object with the target message and arrays of messages before and after it.")),
 		mcp.WithString("message_id", mcp.Required(), mcp.Description("WhatsApp message ID of the target message (use `message_id` from list_messages)")),
 		mcp.WithNumber("before", mcp.DefaultNumber(5), mcp.Description("messages to fetch before the target (default 5; non-positive values fall back to the default)")),
 		mcp.WithNumber("after", mcp.DefaultNumber(5), mcp.Description("messages to fetch after the target (default 5; non-positive values fall back to the default)")),
@@ -220,7 +228,7 @@ func (s *Server) registerGetMessageContext() {
 		if after <= 0 {
 			after = 5
 		}
-		ctxResult, err := s.client.Store().GetMessageContext(ctx, a.MessageID, before, after)
+		ctxResult, err := s.store.GetMessageContext(ctx, a.MessageID, before, after)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

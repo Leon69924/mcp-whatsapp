@@ -16,6 +16,9 @@
 //  5. Every `chat_jid`, `recipient`, `sender_jid`, and `sender_phone_number`
 //     argument reuses the shared `jidDesc` / `recipientDesc` constants so
 //     callers always see the same JID-shape hint.
+//  6. Tools whose output is limited to the operator's read allowlist end their
+//     description with `readDesc` (allowlistNote); tools that only queue an
+//     action for operator approval end theirs with `queuedDesc` (queuedNote).
 package mcp
 
 import (

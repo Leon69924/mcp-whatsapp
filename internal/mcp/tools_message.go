@@ -34,7 +34,7 @@ type editMessageArgs struct {
 
 func (s *Server) registerEditMessage() {
 	tool := mcp.NewTool("edit_message",
-		mcp.WithDescription("Edit a previously-sent text message in place; recipients see the new body with an `edited` label. Only your own messages can be edited and only within WhatsApp's edit window (~15 minutes). Re-edit by calling again with another `new_body`; to remove the message entirely use delete_message (revoke). Returns the plain-text string `Message edited` on success."),
+		mcp.WithDescription(queuedDesc("Edit a previously-sent text message in place; recipients see the new body with an `edited` label. Only your own messages can be edited and only within WhatsApp's edit window (~15 minutes). Re-edit by calling again with another `new_body`; to remove the message entirely use delete_message (revoke). Returns the plain-text string `Message edited` on success.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("message_id", mcp.Required(), mcp.Description("WhatsApp message ID of your own message to edit (use `message_id` from list_messages)")),
 		mcp.WithString("new_body", mcp.Required(), mcp.Description("replacement message body text")),
@@ -43,12 +43,24 @@ func (s *Server) registerEditMessage() {
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a editMessageArgs) (*mcp.CallToolResult, error) {
-		if err := s.client.EditMessage(ctx, a.ChatJID, a.MessageID, a.NewBody); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText("Message edited"), nil
-	}))
+	registerGated(s, tool, gatedTool[editMessageArgs]{
+		prepare: func(_ context.Context, a editMessageArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareMessageRef(a.ChatJID, a.MessageID, "")
+			if reject != nil {
+				return "", "", reject
+			}
+			if r := requireNonEmpty("new_body", a.NewBody); r != nil {
+				return "", "", r
+			}
+			return target, "edit message " + a.MessageID + " to " + previewText(a.NewBody), nil
+		},
+		execute: func(ctx context.Context, a editMessageArgs) (*mcp.CallToolResult, error) {
+			if err := s.client.EditMessage(ctx, a.ChatJID, a.MessageID, a.NewBody); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText("Message edited"), nil
+		},
+	})
 }
 
 // -- delete_message ---------------------------------------------------------
@@ -61,7 +73,7 @@ type deleteMessageArgs struct {
 
 func (s *Server) registerDeleteMessage() {
 	tool := mcp.NewTool("delete_message",
-		mcp.WithDescription("Revoke (delete-for-everyone) a message; recipients see a `message was deleted` notice and the local cache row is marked revoked. Permanent — there is no undo, and the original body cannot be restored once revoked. You can only delete your own messages unless you are a group admin. Use edit_message instead when you only want to correct text. Returns the plain-text string `Message deleted` on success."),
+		mcp.WithDescription(queuedDesc("Revoke (delete-for-everyone) a message; recipients see a `message was deleted` notice and the local cache row is marked revoked. Permanent — there is no undo, and the original body cannot be restored once revoked. You can only delete your own messages unless you are a group admin. Use edit_message instead when you only want to correct text. Returns the plain-text string `Message deleted` on success.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("message_id", mcp.Required(), mcp.Description("WhatsApp message ID of the message to revoke (use `message_id` from list_messages)")),
 		mcp.WithString("sender_jid", mcp.Description("JID of the original sender; required when deleting someone else's message as a group admin, leave empty when deleting your own ("+jidDesc+")")),
@@ -70,12 +82,21 @@ func (s *Server) registerDeleteMessage() {
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a deleteMessageArgs) (*mcp.CallToolResult, error) {
-		if err := s.client.DeleteMessage(ctx, a.ChatJID, a.MessageID, a.SenderJID); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText("Message deleted"), nil
-	}))
+	registerGated(s, tool, gatedTool[deleteMessageArgs]{
+		prepare: func(_ context.Context, a deleteMessageArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareMessageRef(a.ChatJID, a.MessageID, a.SenderJID)
+			if reject != nil {
+				return "", "", reject
+			}
+			return target, "delete message " + a.MessageID + " for everyone", nil
+		},
+		execute: func(ctx context.Context, a deleteMessageArgs) (*mcp.CallToolResult, error) {
+			if err := s.client.DeleteMessage(ctx, a.ChatJID, a.MessageID, a.SenderJID); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText("Message deleted"), nil
+		},
+	})
 }
 
 // -- mark_read --------------------------------------------------------------
@@ -88,7 +109,7 @@ type markReadArgs struct {
 
 func (s *Server) registerMarkRead() {
 	tool := mcp.NewTool("mark_read",
-		mcp.WithDescription("Mark specific incoming messages as read; senders receive read receipts (subject to their privacy settings) and the chat's unread badge decrements. Cannot be unread once acked. Use mark_chat_read to clear the unread badge for an entire chat without enumerating message IDs. Returns the plain-text string `Marked N message(s) read in <chat_jid>`."),
+		mcp.WithDescription(readDesc("Mark specific incoming messages as read; senders receive read receipts (subject to their privacy settings) and the chat's unread badge decrements. Cannot be unread once acked. Use mark_chat_read to clear the unread badge for an entire chat without enumerating message IDs. Returns the plain-text string `Marked N message(s) read in <chat_jid>`.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithArray("message_ids", mcp.Required(), mcp.Description("list of WhatsApp message IDs to ack (use `message_id` values from list_messages); must be non-empty"), mcp.Items(map[string]any{"type": "string"})),
 		mcp.WithString("sender_jid", mcp.Description("JID of the original sender; required in group chats, omit in 1:1 chats ("+jidDesc+")")),
@@ -100,6 +121,9 @@ func (s *Server) registerMarkRead() {
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a markReadArgs) (*mcp.CallToolResult, error) {
 		if len(a.MessageIDs) == 0 {
 			return mcp.NewToolResultError("message_ids must not be empty"), nil
+		}
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+			return r, nil
 		}
 		if err := s.client.MarkRead(ctx, a.ChatJID, a.MessageIDs, a.SenderJID); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -117,7 +141,7 @@ type markChatReadArgs struct {
 
 func (s *Server) registerMarkChatRead() {
 	tool := mcp.NewTool("mark_chat_read",
-		mcp.WithDescription("Ack the most recent incoming messages in a chat to clear its unread badge; senders receive read receipts (subject to their privacy settings). Cannot be unread once acked. Use mark_read for ack-by-message-ID. Returns the plain-text string `Acked N message(s) in <chat_jid>`."),
+		mcp.WithDescription(readDesc("Ack the most recent incoming messages in a chat to clear its unread badge; senders receive read receipts (subject to their privacy settings). Cannot be unread once acked. Use mark_read for ack-by-message-ID. Returns the plain-text string `Acked N message(s) in <chat_jid>`.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("how many of the most recent incoming messages to ack (default 50)")),
 		mcp.WithReadOnlyHintAnnotation(false),
@@ -128,6 +152,9 @@ func (s *Server) registerMarkChatRead() {
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a markChatReadArgs) (*mcp.CallToolResult, error) {
 		if a.ChatJID == "" {
 			return mcp.NewToolResultError("chat_jid is required"), nil
+		}
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+			return r, nil
 		}
 		count, err := s.client.MarkChatRead(ctx, a.ChatJID, a.Limit)
 		if err != nil {
@@ -185,7 +212,7 @@ type requestSyncArgs struct {
 
 func (s *Server) registerRequestSync() {
 	tool := mcp.NewTool("request_sync",
-		mcp.WithDescription("Ask WhatsApp servers to backfill historical messages for a chat into the local cache; messages arrive asynchronously and become queryable via list_messages once delivered. No effect on the chat itself or other users. The request is always anchored on a real cached message, because WhatsApp resolves the cursor by message key. Use `anchor: \"oldest\"` to extend history backwards, calling repeatedly to walk back `count` messages at a time; `anchor: \"newest\"` (the default) only fills gaps below the most recent message. Returns a plain-text confirmation describing what was requested. An empty result afterwards means the server served nothing for that cursor, typically because the history predates WhatsApp's retention for linked devices."),
+		mcp.WithDescription(readDesc("Ask WhatsApp servers to backfill historical messages for a chat into the local cache; messages arrive asynchronously and become queryable via list_messages once delivered. No effect on the chat itself or other users. The request is always anchored on a real cached message, because WhatsApp resolves the cursor by message key. Use `anchor: \"oldest\"` to extend history backwards, calling repeatedly to walk back `count` messages at a time; `anchor: \"newest\"` (the default) only fills gaps below the most recent message. Returns a plain-text confirmation describing what was requested. An empty result afterwards means the server served nothing for that cursor, typically because the history predates WhatsApp's retention for linked devices.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("from_timestamp", mcp.Description("ISO-8601 UTC timestamp; anchors on the newest cached message at or before this time, falling back to the oldest cached message when nothing is cached that far back. Ignored when `anchor` is set")),
 		mcp.WithString("anchor", mcp.Description("which cached message to anchor on: `oldest` to extend history backwards, `newest` to fill recent gaps (default)"), mcp.Enum(client.AnchorNewest, client.AnchorOldest)),
@@ -220,6 +247,9 @@ func (s *Server) registerRequestSync() {
 			}
 			ts = t
 		}
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+			return r, nil
+		}
 		msg, err := s.client.RequestHistorySync(ctx, a.ChatJID, ts, a.Anchor, int(a.Count), useLID)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -238,7 +268,7 @@ type downloadMediaArgs struct {
 
 func (s *Server) registerDownloadMedia() {
 	tool := mcp.NewTool("download_media",
-		mcp.WithDescription("Fetch the encrypted media payload (image, video, audio, document) for a previously-cached message, decrypt it, and write it to a local file under the store directory; returns the absolute path. For image and audio downloads at most 5 MiB, the decrypted bytes are ALSO embedded in the tool result as an ImageContent or AudioContent block so remote MCP clients can view or hear the payload without accessing the daemon's filesystem. Videos and documents are not embedded (too large or not renderable inline). Optionally also writes the decrypted file to `output_path`, which must live under the configured media root (`WHATSAPP_MCP_MEDIA_ROOT`, default `<store>/uploads/`). No notification is sent to the sender or chat. Idempotent — repeated calls for the same message return the cached file path. Prerequisite: the message must contain media; use list_messages to find media message IDs. Returns a JSON object `{Success, Message, MediaType, Filename, Path}` as the first content block, followed by an optional ImageContent/AudioContent block for renderable media."),
+		mcp.WithDescription(readDesc("Fetch the encrypted media payload (image, video, audio, document) for a previously-cached message, decrypt it, and write it to a local file under the store directory; returns the absolute path. For image and audio downloads at most 5 MiB, the decrypted bytes are ALSO embedded in the tool result as an ImageContent or AudioContent block so remote MCP clients can view or hear the payload without accessing the daemon's filesystem. Videos and documents are not embedded (too large or not renderable inline). Optionally also writes the decrypted file to `output_path`, which must live under the configured media root (`WHATSAPP_MCP_MEDIA_ROOT`, default `<store>/uploads/`). No notification is sent to the sender or chat. Idempotent — repeated calls for the same message return the cached file path. Prerequisite: the message must contain media; use list_messages to find media message IDs. Returns a JSON object `{Success, Message, MediaType, Filename, Path}` as the first content block, followed by an optional ImageContent/AudioContent block for renderable media.")),
 		mcp.WithString("message_id", mcp.Required(), mcp.Description("WhatsApp message ID of a media message (use `message_id` from list_messages)")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
 		mcp.WithString("output_path", mcp.Description("optional absolute path under the configured media root (`WHATSAPP_MCP_MEDIA_ROOT`, default `<store>/uploads/`); parent directory must exist; calls are skipped if the file already exists; omit to write only to the daemon cache")),
@@ -250,6 +280,9 @@ func (s *Server) registerDownloadMedia() {
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a downloadMediaArgs) (*mcp.CallToolResult, error) {
 		if a.MessageID == "" || a.ChatJID == "" {
 			return mcp.NewToolResultError("message_id and chat_jid are required"), nil
+		}
+		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+			return r, nil
 		}
 		r := s.client.Download(ctx, a.MessageID, a.ChatJID, a.OutputPath)
 		return downloadMediaResult(r)

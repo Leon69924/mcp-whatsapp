@@ -9,6 +9,10 @@ package mcp
 //   - tools_groups.go  — group management (create, leave, participants, settings, …)
 //   - tools_media.go   — polls + contact cards
 //   - tools_privacy.go — blocklist, presence, privacy settings, status message
+//   - tools_actions.go — get_action_status for calls queued for operator approval
+//
+// Read tools are limited to the operator's read allowlist (access.go) and send
+// or mutating tools are queued for operator approval (approval.go).
 //
 // Shared helpers live in tools_core.go (parseTimestamp, normalizeRecipientToChatJID,
 // maybeMarkChatRead). Common result helpers live in result.go.
@@ -23,4 +27,7 @@ func (s *Server) registerTools() {
 
 	// Phase 2 — polls + contact cards.
 	s.registerMediaTools()
+
+	// Operator approval queue.
+	s.registerActionTools()
 }
