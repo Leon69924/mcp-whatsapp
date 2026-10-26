@@ -53,10 +53,12 @@ func (f *fakeAccess) ReplaceReadAllowlist(_ context.Context, jids []string) erro
 
 type fakeGroups struct {
 	connected bool
+	paired    bool
 	groups    []store.AccessChat
 }
 
 func (f *fakeGroups) IsConnected() bool { return f.connected }
+func (f *fakeGroups) IsLoggedIn() bool  { return f.paired }
 func (f *fakeGroups) OperatorJoinedGroups(context.Context) ([]store.AccessChat, error) {
 	return f.groups, nil
 }
@@ -70,7 +72,7 @@ func newOperatorTest() (*operatorHandlers, *fakeApprovals, *fakeAccess, *fakeGro
 		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
 	}}}
 	ac := &fakeAccess{}
-	gr := &fakeGroups{connected: true}
+	gr := &fakeGroups{connected: true, paired: true}
 	return newOperatorHandlers(ap, ac, gr), ap, ac, gr
 }
 
@@ -242,20 +244,36 @@ func TestAccessPage_ListsJoinedGroupsWithoutCachedMessages(t *testing.T) {
 	}
 }
 
+// While pairing the socket is connected but has no session; the live group
+// query would fail, so the page must fall back to the cache in that state too.
 func TestAccessPage_NotConnectedShowsNotice(t *testing.T) {
-	h, _, ac, gr := newOperatorTest()
-	gr.connected = false
-	gr.groups = []store.AccessChat{{JID: "555000111@g.us", Name: "Silent group", IsGroup: true}}
-	ac.chats = []store.AccessChat{{JID: "447700000001@s.whatsapp.net", Name: "Alice"}}
-	body := get(h.handleAccessPage, "/access").Body.String()
-	if !strings.Contains(body, "WhatsApp is not connected") || !strings.Contains(body, "no cached message") {
-		t.Errorf("not-connected notice missing:\n%s", body)
-	}
-	if !strings.Contains(body, "Alice") {
-		t.Error("cached chats must still be listed")
-	}
-	if strings.Contains(body, "Silent group") {
-		t.Error("the live group list must not be consulted while disconnected")
+	for _, tc := range []struct {
+		name              string
+		connected, paired bool
+	}{
+		{"disconnected", false, true},
+		{"connected but not paired", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, ac, gr := newOperatorTest()
+			gr.connected, gr.paired = tc.connected, tc.paired
+			gr.groups = []store.AccessChat{{JID: "555000111@g.us", Name: "Silent group", IsGroup: true}}
+			ac.chats = []store.AccessChat{{JID: "447700000001@s.whatsapp.net", Name: "Alice"}}
+			w := get(h.handleAccessPage, "/access")
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d", w.Code)
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, "not connected or not paired yet") || !strings.Contains(body, "no cached message") {
+				t.Errorf("not-connected notice missing:\n%s", body)
+			}
+			if !strings.Contains(body, "Alice") {
+				t.Error("cached chats must still be listed")
+			}
+			if strings.Contains(body, "Silent group") {
+				t.Error("the live group list must not be consulted without a live session")
+			}
+		})
 	}
 }
 

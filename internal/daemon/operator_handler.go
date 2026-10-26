@@ -45,6 +45,7 @@ type accessBackend interface {
 // ever be wired to the operator page.
 type groupsBackend interface {
 	IsConnected() bool
+	IsLoggedIn() bool
 	OperatorJoinedGroups(ctx context.Context) ([]store.AccessChat, error)
 }
 
@@ -265,11 +266,11 @@ type accessPageData struct {
 }
 
 // loadAccessChats returns the chats the page offers: the cached ones plus the
-// live joined groups. connected is false when WhatsApp is not connected and
-// only the cache could be listed.
+// live joined groups. connected is false when WhatsApp is not connected with a
+// paired session and only the cache could be listed.
 func (h *operatorHandlers) loadAccessChats(ctx context.Context) (chats []store.AccessChat, connected bool, err error) {
 	var joined []store.AccessChat
-	if h.groups.IsConnected() {
+	if h.groups.IsConnected() && h.groups.IsLoggedIn() {
 		connected = true
 		if joined, err = h.groups.OperatorJoinedGroups(ctx); err != nil {
 			return nil, false, err

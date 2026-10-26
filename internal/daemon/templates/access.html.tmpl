@@ -3,7 +3,7 @@
 <h1>Read access</h1>
 <p class="muted">The model can read only the chats ticked here. With nothing ticked it can read nothing. Tick the chats, then press Save: the saved selection replaces the whole list.</p>
 {{if ge .Saved 0}}<p role="status"><strong>Saved: {{.Saved}} chats allowed</strong></p>{{end}}
-{{if .NotConnected}}<p role="alert"><strong>WhatsApp is not connected.</strong> Groups you are in that have no cached message are missing from this list until it connects; reload then.</p>{{end}}
+{{if .NotConnected}}<p role="alert"><strong>WhatsApp is not connected or not paired yet.</strong> Groups you are in that have no cached message are missing from this list until it is; reload then.</p>{{end}}
 <form method="post" action="/access/save" id="access-form" style="display:block" autocomplete="off">
 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 <p>
