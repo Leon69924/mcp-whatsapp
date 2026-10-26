@@ -336,6 +336,24 @@ CREATE TABLE IF NOT EXISTS poll_votes (
 	timestamp TIMESTAMP NOT NULL,
 	PRIMARY KEY (poll_message_id, poll_chat_jid, voter_jid)
 );
+
+CREATE TABLE IF NOT EXISTS read_allowlist (
+	chat_jid TEXT PRIMARY KEY,
+	added_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+	id TEXT PRIMARY KEY,
+	tool TEXT NOT NULL,
+	args_json TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	target_jid TEXT NOT NULL,
+	status TEXT NOT NULL,
+	created_at TIMESTAMP NOT NULL,
+	expires_at TIMESTAMP NOT NULL,
+	decided_at TIMESTAMP,
+	result_json TEXT
+);
 `
 
 // migrateSchema brings legacy databases up to the current layout. SQLite lacks

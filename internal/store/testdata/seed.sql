@@ -34,6 +34,24 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     PRIMARY KEY (poll_message_id, poll_chat_jid, voter_jid)
 );
 
+CREATE TABLE IF NOT EXISTS read_allowlist (
+    chat_jid TEXT PRIMARY KEY,
+    added_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id TEXT PRIMARY KEY,
+    tool TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    target_jid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    decided_at TIMESTAMP,
+    result_json TEXT
+);
+
 -- whatsmeow LID->PN map (normally lives in whatsapp.db, but co-located for tests)
 CREATE TABLE IF NOT EXISTS whatsmeow_lid_map (
     lid TEXT PRIMARY KEY,
@@ -92,3 +110,12 @@ INSERT INTO whatsmeow_lid_map (lid, pn) VALUES
 -- lookups must reach whatsmeow_contacts, not just chats).
 INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name) VALUES
     ('me@s.whatsapp.net', '919900000000@s.whatsapp.net', 'Jane', 'Jane Smith Delhi', 'Jane S', '');
+
+-- Everything above is readable by default in tests; the allowlist tests
+-- narrow it explicitly.
+INSERT INTO read_allowlist (chat_jid, added_at) VALUES
+    ('447700000001@s.whatsapp.net', '2026-01-01 00:00:00'),
+    ('123456789@g.us',              '2026-01-01 00:00:00'),
+    ('447700000002@s.whatsapp.net', '2026-01-01 00:00:00'),
+    ('55443322@lid',                '2026-01-01 00:00:00'),
+    ('919900000000@s.whatsapp.net', '2026-01-01 00:00:00');
