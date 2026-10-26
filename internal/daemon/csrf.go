@@ -47,19 +47,18 @@ func (g *csrfGuard) valid(token string) bool {
 }
 
 // sameOriginPost reports whether a state-changing request was made by a page
-// served from this daemon: a browser that marks the request cross-site
-// (Sec-Fetch-Site other than same-origin), or sends an Origin that is not the
-// host the request was addressed to, is refused. Clients that send neither
-// header (curl) pass; the CSRF token still applies to them.
+// served from this daemon. Both browser provenance headers are required: the
+// request must carry Sec-Fetch-Site: same-origin and an Origin naming the host
+// it was addressed to. Requests without them (curl, scripts) are refused, so
+// an operator decision has to come from the rendered page in a browser.
 func sameOriginPost(r *http.Request) error {
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
-		return fmt.Errorf("cross-site request refused (Sec-Fetch-Site: %s)", site)
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "same-origin" {
+		return fmt.Errorf("request refused: Sec-Fetch-Site must be same-origin (got %q)", site)
 	}
-	if origin := r.Header.Get("Origin"); origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || u.Host != r.Host {
-			return fmt.Errorf("cross-origin request refused (Origin: %s)", origin)
-		}
+	origin := r.Header.Get("Origin")
+	u, err := url.Parse(origin)
+	if origin == "" || err != nil || u.Host != r.Host {
+		return fmt.Errorf("request refused: Origin must match the daemon host (got %q)", origin)
 	}
 	return nil
 }

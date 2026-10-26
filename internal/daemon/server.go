@@ -122,6 +122,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	rootHandler := authMiddleware(mux, s.cfg.AuthToken)
+	if s.cfg.AuthToken == "" {
+		rootHandler = loopbackHostMiddleware(rootHandler, s.BoundAddr)
+	}
 
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
@@ -196,6 +199,32 @@ func (s *Server) onLoggedOut(ctx context.Context) func() {
 		}
 		_ = s.cfg.Driver.StartPairing(ctx, onQR, onPairSuccess)
 	}
+}
+
+// loopbackHostMiddleware refuses requests whose Host header is not a loopback
+// name for the bound port. Without a bearer token the daemon trusts loopback
+// alone, and a DNS-rebinding page (attacker.example resolving to 127.0.0.1)
+// would otherwise be same-origin with /mcp, /approvals and /access. With a
+// token, the browser cannot attach it, so authMiddleware already covers this.
+func loopbackHostMiddleware(next http.Handler, boundAddr func() string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, port, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			http.Error(w, "host: must be a loopback address with port", http.StatusMisdirectedRequest)
+			return
+		}
+		_, boundPort, err := net.SplitHostPort(boundAddr())
+		if err != nil || port != boundPort {
+			http.Error(w, "host: port does not match the daemon", http.StatusMisdirectedRequest)
+			return
+		}
+		switch host {
+		case "127.0.0.1", "localhost", "::1":
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "host: must be 127.0.0.1, localhost or [::1]", http.StatusMisdirectedRequest)
+		}
+	})
 }
 
 func authMiddleware(next http.Handler, token string) http.Handler {

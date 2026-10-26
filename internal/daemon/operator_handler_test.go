@@ -72,6 +72,10 @@ func get(h http.HandlerFunc, path string) *httptest.ResponseRecorder {
 	return w
 }
 
+// sameOriginHeaders are the provenance headers a browser sends for a form
+// posted from a page this daemon served (httptest requests use example.com).
+var sameOriginHeaders = map[string]string{"Origin": "http://example.com", "Sec-Fetch-Site": "same-origin"}
+
 func post(h http.HandlerFunc, path string, form url.Values, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -95,7 +99,7 @@ func TestApprovalsPage_ShowsFullDetail(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		"the full message text", "447700000001@s.whatsapp.net", "Alice", "send_message -> x: hi",
+		"the full message text", "447700000001@s.whatsapp.net", "Alice", "send_message -&gt; x: hi",
 		`action="/approvals/approve"`, `action="/approvals/reject"`, `href="/access"`,
 		`name="csrf_token"`, "rate limited", "failed",
 	} {
@@ -112,7 +116,7 @@ func TestApprove_RunsOnlyWithTokenAndSameOrigin(t *testing.T) {
 	h, ap, _ := newOperatorTest()
 	form := func(token string) url.Values { return url.Values{"id": {"act1"}, "csrf_token": {token}} }
 
-	if w := post(h.handleApprove, "/approvals/approve", form("wrong"), nil); w.Code != http.StatusForbidden {
+	if w := post(h.handleApprove, "/approvals/approve", form("wrong"), sameOriginHeaders); w.Code != http.StatusForbidden {
 		t.Fatalf("bad token: status = %d; want 403", w.Code)
 	}
 
@@ -129,8 +133,15 @@ func TestApprove_RunsOnlyWithTokenAndSameOrigin(t *testing.T) {
 		t.Fatalf("refused requests approved %v", ap.approved)
 	}
 
-	same := map[string]string{"Origin": "http://example.com", "Sec-Fetch-Site": "same-origin"}
-	w := post(h.handleApprove, "/approvals/approve", form(token), same)
+	noProvenance := map[string]string{}
+	if w := post(h.handleApprove, "/approvals/approve", form(token), noProvenance); w.Code != http.StatusForbidden {
+		t.Fatalf("no provenance headers: status = %d; want 403", w.Code)
+	}
+	if len(ap.approved) != 0 {
+		t.Fatalf("request without provenance approved %v", ap.approved)
+	}
+
+	w := post(h.handleApprove, "/approvals/approve", form(token), sameOriginHeaders)
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/approvals" {
 		t.Fatalf("approve: status = %d location = %q", w.Code, w.Header().Get("Location"))
 	}
@@ -139,7 +150,7 @@ func TestApprove_RunsOnlyWithTokenAndSameOrigin(t *testing.T) {
 	}
 
 	// The token was consumed: replaying the same form must not approve again.
-	if w := post(h.handleApprove, "/approvals/approve", form(token), nil); w.Code != http.StatusForbidden {
+	if w := post(h.handleApprove, "/approvals/approve", form(token), sameOriginHeaders); w.Code != http.StatusForbidden {
 		t.Fatalf("replayed token: status = %d; want 403", w.Code)
 	}
 }
@@ -167,7 +178,7 @@ func TestDecision_ErrorsMapToHTTPStatus(t *testing.T) {
 	for _, tc := range cases {
 		ap.err = tc.err
 		token := h.approvalsCSRF.generate()
-		w := post(h.handleReject, "/approvals/reject", url.Values{"id": {"act1"}, "csrf_token": {token}}, nil)
+		w := post(h.handleReject, "/approvals/reject", url.Values{"id": {"act1"}, "csrf_token": {token}}, sameOriginHeaders)
 		if w.Code != tc.want {
 			t.Errorf("%v: status = %d; want %d", tc.err, w.Code, tc.want)
 		}
@@ -211,11 +222,11 @@ func TestAccessChanges_RequireTokenAndOrigin(t *testing.T) {
 		t.Fatalf("refused requests allowed %v", ac.added)
 	}
 
-	if w := post(h.handleAllow, "/access/allow", url.Values{"chat_jid": {jid}, "csrf_token": {token}}, nil); w.Code != http.StatusSeeOther {
+	if w := post(h.handleAllow, "/access/allow", url.Values{"chat_jid": {jid}, "csrf_token": {token}}, sameOriginHeaders); w.Code != http.StatusSeeOther {
 		t.Fatalf("allow: status = %d", w.Code)
 	}
 	token = h.accessCSRF.generate()
-	if w := post(h.handleRemove, "/access/remove", url.Values{"chat_jid": {jid}, "csrf_token": {token}}, nil); w.Code != http.StatusSeeOther {
+	if w := post(h.handleRemove, "/access/remove", url.Values{"chat_jid": {jid}, "csrf_token": {token}}, sameOriginHeaders); w.Code != http.StatusSeeOther {
 		t.Fatalf("remove: status = %d", w.Code)
 	}
 	if len(ac.added) != 1 || len(ac.removed) != 1 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -209,5 +210,30 @@ func TestServer_LogoutErrorFromReset(t *testing.T) {
 	s := newTestServer(t, drv)
 	if err := s.cfg.Driver.Logout(context.Background()); err == nil {
 		t.Fatal("expected logout error to surface")
+	}
+}
+
+func TestLoopbackHostMiddleware_RefusesRebindingHosts(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := loopbackHostMiddleware(ok, func() string { return "127.0.0.1:8765" })
+	cases := []struct {
+		host string
+		want int
+	}{
+		{"127.0.0.1:8765", http.StatusOK},
+		{"localhost:8765", http.StatusOK},
+		{"[::1]:8765", http.StatusOK},
+		{"attacker.example:8765", http.StatusMisdirectedRequest},
+		{"127.0.0.1:9999", http.StatusMisdirectedRequest},
+		{"127.0.0.1", http.StatusMisdirectedRequest},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/approvals", nil)
+		req.Host = tc.host
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != tc.want {
+			t.Errorf("Host %q: status = %d; want %d", tc.host, w.Code, tc.want)
+		}
 	}
 }

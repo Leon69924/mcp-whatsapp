@@ -232,9 +232,9 @@ Two safeguards sit between the model and your account. Both are enforced by the 
 | `WHATSAPP_MCP_APPROVAL_TTL` | How long a queued action stays approvable, as a Go duration (default `24h`). An invalid value stops `serve` at startup. |
 | `WHATSAPP_MCP_NOTIFY` | `1` runs `notify-send -a whatsapp-mcp "WhatsApp: approval needed" "<summary>"` for every queued action; failures are logged. |
 
-Both pages are server-rendered, accept state changes only as POST with a single-use CSRF token, and refuse a request whose `Origin` is not the daemon's own host or whose `Sec-Fetch-Site` is not `same-origin`. With `-allow-remote` they require the same bearer token as `/pair` and `/mcp`.
+Both pages are server-rendered, accept state changes only as POST with a single-use CSRF token, and require both browser provenance headers (`Sec-Fetch-Site: same-origin` and an `Origin` naming the daemon's host), so a plain script request is refused. Without a bearer token every route, `/mcp` included, also refuses a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` on the bound port, which blocks DNS-rebinding pages. With `-allow-remote` they require the same bearer token as `/pair` and `/mcp`.
 
-**Limitation.** This guards against prompt injection arriving through MCP tool calls. It does not stop a process on the same machine from reaching the loopback UI: an agent with unrestricted local shell access can fetch the page, read the CSRF token and approve its own actions. Do not run the daemon alongside agents that have unattended shell access, or restrict their access to the daemon's port.
+**Limitation.** This guards against prompt injection arriving through MCP tool calls. It does not stop a process on the same machine from reaching the loopback UI: an agent with unrestricted local shell access can fetch the page, read the CSRF token, forge the provenance headers and approve its own actions. Do not run the daemon alongside agents that have unattended shell access, or restrict their access to the daemon's port.
 
 ## Limitations
 
