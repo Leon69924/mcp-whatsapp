@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -31,6 +32,14 @@ type actionStatus struct {
 	ExpiresAt time.Time       `json:"expires_at"`
 	DecidedAt *time.Time      `json:"decided_at,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
+	// ResultWithheld explains why Result carries no text.
+	ResultWithheld string `json:"result_withheld,omitempty"`
+}
+
+// redactedResult is all that is revealed of an outcome whose text may describe
+// a chat the model may not read.
+type redactedResult struct {
+	IsError bool `json:"is_error"`
 }
 
 func (s *Server) registerGetActionStatus() {
@@ -69,8 +78,40 @@ func (s *Server) registerGetActionStatus() {
 			out.DecidedAt = &action.DecidedAt
 		}
 		if action.ResultJSON != "" {
-			out.Result = json.RawMessage(action.ResultJSON)
+			if err := s.fillResult(ctx, &out, action); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
 		}
 		return resultJSON(out)
 	}))
+}
+
+// fillResult attaches the execution result to the status. The result text can
+// describe chats and members (group info, invite links, errors naming a group),
+// so it is shown only for an action whose target chat the model may read;
+// otherwise only success or failure is revealed.
+func (s *Server) fillResult(ctx context.Context, out *actionStatus, action store.PendingAction) error {
+	readable := false
+	if action.TargetJID != "" {
+		allowed, err := s.store.IsChatAllowed(ctx, action.TargetJID)
+		if err != nil {
+			return fmt.Errorf("read allowlist lookup failed: %w", err)
+		}
+		readable = allowed
+	}
+	if readable {
+		out.Result = json.RawMessage(action.ResultJSON)
+		return nil
+	}
+	var full actionResult
+	if err := json.Unmarshal([]byte(action.ResultJSON), &full); err != nil {
+		return fmt.Errorf("decode stored result: %w", err)
+	}
+	redacted, err := json.Marshal(redactedResult{IsError: full.IsError})
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	out.Result = redacted
+	out.ResultWithheld = "the action's target is not a chat on the read allowlist; the operator can read the full result at /approvals"
+	return nil
 }

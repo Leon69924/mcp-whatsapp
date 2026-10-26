@@ -23,6 +23,7 @@ func (s *Server) registerGroupTools() {
 	s.registerSetGroupAnnounce()
 	s.registerSetGroupLocked()
 	s.registerGetGroupInviteLink()
+	s.registerResetGroupInviteLink()
 	s.registerJoinGroupWithLink()
 }
 
@@ -307,19 +308,15 @@ func (s *Server) registerSetGroupLocked() {
 
 type getGroupInviteLinkArgs struct {
 	ChatJID string `json:"chat_jid"`
-	Reset   bool   `json:"reset,omitempty"`
 }
 
 func (s *Server) registerGetGroupInviteLink() {
 	tool := mcp.NewTool("get_group_invite_link",
-		mcp.WithDescription(readDesc("Return a group's current invite link, or revoke and mint a fresh one when `reset=true`. Warning: `reset=true` permanently invalidates the previous link — anyone holding a previously-shared copy can no longer use it to join, and there is no undo. Prerequisite: admin. Use join_group_with_link to consume an invite. Returns a JSON object `{link}` containing the active invite URL.")),
+		mcp.WithDescription(readDesc("Return a group's current invite link without changing it. Read-only; no side effects. Prerequisite: admin. Use reset_group_invite_link to revoke it and mint a new one, and join_group_with_link to consume an invite. Returns a JSON object `{link}` containing the active invite URL.")),
 		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
-		mcp.WithBoolean("reset", mcp.DefaultBool(false), mcp.Description("if true, permanently revoke the existing invite link and mint a new one (defaults to false); previously-shared copies stop working")),
-		// Hints reflect the worst case: reset=true permanently revokes the
-		// old link, so this is not read-only and is destructive.
-		mcp.WithReadOnlyHintAnnotation(false),
-		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a getGroupInviteLinkArgs) (*mcp.CallToolResult, error) {
@@ -329,9 +326,40 @@ func (s *Server) registerGetGroupInviteLink() {
 		if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
 			return r, nil
 		}
-		link, err := s.client.GetGroupInviteLink(ctx, a.ChatJID, a.Reset)
+		link, err := s.client.GetGroupInviteLink(ctx, a.ChatJID, false)
 		return toolResult(map[string]string{"link": link}, err)
 	}))
+}
+
+type resetGroupInviteLinkArgs struct {
+	ChatJID string `json:"chat_jid"`
+}
+
+func (s *Server) registerResetGroupInviteLink() {
+	tool := mcp.NewTool("reset_group_invite_link",
+		mcp.WithDescription(queuedDesc("Revoke a group's invite link and mint a fresh one. Warning: this permanently invalidates the previous link — anyone holding a previously-shared copy can no longer use it to join, and there is no undo. Prerequisite: admin, and the group must be on the operator's read allowlist. Use get_group_invite_link to read the current link. Returns a JSON object `{link}` containing the new invite URL.")),
+		mcp.WithString("chat_jid", mcp.Required(), mcp.Description(jidDesc)),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	)
+	registerGated(s, tool, gatedTool[resetGroupInviteLinkArgs]{
+		prepare: func(ctx context.Context, a resetGroupInviteLinkArgs) (string, string, *mcp.CallToolResult) {
+			target, reject := prepareChat(a.ChatJID)
+			if reject != nil {
+				return "", "", reject
+			}
+			if r := s.requireReadable(ctx, "chat_jid", a.ChatJID); r != nil {
+				return "", "", r
+			}
+			return target, "revoke the invite link and mint a new one", nil
+		},
+		execute: func(ctx context.Context, a resetGroupInviteLinkArgs) (*mcp.CallToolResult, error) {
+			link, err := s.client.GetGroupInviteLink(ctx, a.ChatJID, true)
+			return toolResult(map[string]string{"link": link}, err)
+		},
+	})
 }
 
 type joinGroupArgs struct {

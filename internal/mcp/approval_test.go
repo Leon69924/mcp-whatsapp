@@ -18,7 +18,7 @@ import (
 // gatedToolNames is every tool that is queued for operator approval.
 var gatedToolNames = []string{
 	"block_contact", "create_group", "delete_message", "edit_message",
-	"join_group_with_link", "leave_group", "send_audio_message",
+	"join_group_with_link", "leave_group", "reset_group_invite_link", "send_audio_message",
 	"send_contact_card", "send_file", "send_message", "send_poll",
 	"send_poll_vote", "send_reaction", "send_reply", "set_group_announce",
 	"set_group_locked", "set_group_name", "set_group_topic",
@@ -307,5 +307,40 @@ func TestPendingActionsListingExpiresStaleOnes(t *testing.T) {
 	recent, err := s.RecentActions(context.Background(), 10)
 	if err != nil || len(recent) != 1 || recent[0].Status != store.ActionExpired {
 		t.Fatalf("RecentActions = %+v, %v; want the expired action", recent, err)
+	}
+}
+
+func TestGetActionStatus_WithholdsResultTextForUnreadableTargets(t *testing.T) {
+	s, st := newStoreServer(t)
+	ctx := context.Background()
+	secret := `{"is_error":false,"text":"{\"jid\":\"120363@g.us\",\"name\":\"Secret Group\"}"}`
+	for _, tc := range []struct{ id, target string }{{"noTarget", ""}, {"offList", "447700000001@s.whatsapp.net"}, {"onList", "447700000002@s.whatsapp.net"}} {
+		err := st.CreateAction(ctx, store.PendingAction{
+			ID: tc.id, Tool: "create_group", ArgsJSON: "{}", Summary: "s", TargetJID: tc.target,
+			CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.ClaimAction(ctx, tc.id, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.FinishAction(ctx, tc.id, store.ActionExecuted, secret); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.AddReadAllowlist(ctx, "447700000002@s.whatsapp.net"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"noTarget", "offList"} {
+		got := resultText(t, callTool(t, s, "get_action_status", map[string]any{"action_id": id}))
+		if strings.Contains(got, "Secret Group") || !strings.Contains(got, "result_withheld") || !strings.Contains(got, `"is_error": false`) {
+			t.Fatalf("%s: status leaked or omitted the redaction: %s", id, got)
+		}
+	}
+	got := resultText(t, callTool(t, s, "get_action_status", map[string]any{"action_id": "onList"}))
+	if !strings.Contains(got, "Secret Group") || strings.Contains(got, "result_withheld") {
+		t.Fatalf("readable target: want the full result, got %s", got)
 	}
 }
