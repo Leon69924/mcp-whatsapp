@@ -16,16 +16,22 @@ import (
 // See issue #16: WhatsApp JIDs require bare digits in the user portion, but
 // LLMs and humans both reach for E.164-with-`+` they know from other channels.
 func NormalizeRecipient(recipient string) (string, error) {
-	recipient = strings.TrimSpace(recipient)
-	if recipient == "" {
-		return "", fmt.Errorf("recipient: required")
+	return NormalizeJIDArg("recipient", recipient)
+}
+
+// NormalizeJIDArg is NormalizeRecipient for any JID-shaped tool argument: the
+// errors name field instead of `recipient`.
+func NormalizeJIDArg(field, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s: required", field)
 	}
-	if strings.Contains(recipient, "@") {
-		return recipient, nil
+	if strings.Contains(value, "@") {
+		return value, nil
 	}
-	trimmed := strings.TrimPrefix(recipient, "+")
+	trimmed := strings.TrimPrefix(value, "+")
 	if trimmed == "" || !isAllDigits(trimmed) {
-		return "", fmt.Errorf("recipient: must be digits only (no `+` prefix, spaces, or punctuation); got %q", recipient)
+		return "", fmt.Errorf("%s: must be digits only (no `+` prefix, spaces, or punctuation); got %q", field, value)
 	}
 	return trimmed, nil
 }

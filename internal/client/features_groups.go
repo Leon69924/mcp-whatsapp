@@ -70,7 +70,8 @@ func (c *Client) LeaveGroup(ctx context.Context, chatJID string) error {
 	return nil
 }
 
-// ListJoinedGroups returns JSON of all groups the user is in.
+// ListJoinedGroups returns JSON of the groups the user is in that are on the
+// read allowlist.
 func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 	if !c.wa.IsConnected() {
 		return "", errors.New("not connected to WhatsApp")
@@ -79,7 +80,17 @@ func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list joined groups: %w", err)
 	}
-	b, err := json.Marshal(groups)
+	allowed, err := c.store.AllowedChats(ctx)
+	if err != nil {
+		return "", err
+	}
+	readable := make([]*types.GroupInfo, 0, len(groups))
+	for _, g := range groups {
+		if allowed.Has(g.JID.String()) {
+			readable = append(readable, g)
+		}
+	}
+	b, err := json.Marshal(readable)
 	if err != nil {
 		return "", fmt.Errorf("marshal groups: %w", err)
 	}
