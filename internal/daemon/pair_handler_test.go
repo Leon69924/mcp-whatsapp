@@ -96,7 +96,7 @@ func TestHandlePairQR_NoQR(t *testing.T) {
 func TestHandlePairReset_POST_CallsLogoutAndRedirects(t *testing.T) {
 	h, rst := newTestHandlers(true, "", nil)
 	// Generate a valid CSRF token (as the GET handler would).
-	token := h.generateCSRFToken()
+	token := h.csrf.generate()
 	body := strings.NewReader("csrf_token=" + token)
 	req := httptest.NewRequest(http.MethodPost, "/pair/reset", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -130,7 +130,7 @@ func TestHandlePairReset_POST_RejectsMissingCSRF(t *testing.T) {
 
 func TestHandlePairReset_POST_RejectsInvalidCSRF(t *testing.T) {
 	h, rst := newTestHandlers(true, "", nil)
-	_ = h.generateCSRFToken() // generate a real one
+	_ = h.csrf.generate() // generate a real one
 	body := strings.NewReader("csrf_token=wrong-token")
 	req := httptest.NewRequest(http.MethodPost, "/pair/reset", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -146,7 +146,7 @@ func TestHandlePairReset_POST_RejectsInvalidCSRF(t *testing.T) {
 
 func TestHandlePairReset_POST_CSRFTokenIsSingleUse(t *testing.T) {
 	h, _ := newTestHandlers(true, "", nil)
-	token := h.generateCSRFToken()
+	token := h.csrf.generate()
 
 	// First use should succeed.
 	body := strings.NewReader("csrf_token=" + token)
@@ -181,7 +181,7 @@ func TestHandlePairReset_RejectsGET(t *testing.T) {
 
 func TestHandlePairReset_LogoutErrorSurfaces(t *testing.T) {
 	h, _ := newTestHandlers(true, "", errors.New("boom"))
-	token := h.generateCSRFToken()
+	token := h.csrf.generate()
 	body := strings.NewReader("csrf_token=" + token)
 	req := httptest.NewRequest(http.MethodPost, "/pair/reset", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -216,7 +216,7 @@ func TestPairGet_RateLimited(t *testing.T) {
 func TestPairReset_RateLimited(t *testing.T) {
 	h, _ := newTestHandlers(true, "", nil)
 	// First POST should succeed (burst=1).
-	token := h.generateCSRFToken()
+	token := h.csrf.generate()
 	body := strings.NewReader("csrf_token=" + token)
 	req := httptest.NewRequest(http.MethodPost, "/pair/reset", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -226,7 +226,7 @@ func TestPairReset_RateLimited(t *testing.T) {
 		t.Fatalf("first POST: want 303, got %d", w.Code)
 	}
 	// Second should be rate-limited (rate limiter fires before CSRF check).
-	token2 := h.generateCSRFToken()
+	token2 := h.csrf.generate()
 	body2 := strings.NewReader("csrf_token=" + token2)
 	req2 := httptest.NewRequest(http.MethodPost, "/pair/reset", body2)
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -278,7 +278,7 @@ func (f *fakePairCoder) PairPhone(_ context.Context, _ string) (string, error) {
 func TestHandlePairCode_Success(t *testing.T) {
 	cache := NewPairCache()
 	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{code: "ABCD1234"})
-	h.csrfToken = "tok"
+	h.csrf.token = "tok"
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=+919876543210"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -318,7 +318,7 @@ func TestHandlePairCode_NoCoder(t *testing.T) {
 func TestHandlePairCode_InvalidPhone(t *testing.T) {
 	cache := NewPairCache()
 	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
-	h.csrfToken = "tok"
+	h.csrf.token = "tok"
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=0123456"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

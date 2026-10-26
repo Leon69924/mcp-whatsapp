@@ -1,0 +1,42 @@
+{{define "title"}}Approvals{{end}}
+{{define "content"}}
+<h1>Pending approvals</h1>
+<p class="muted">The model asked for these actions. Nothing runs until you approve it; an unanswered request expires.</p>
+{{if not .Pending}}<p>Nothing is waiting for approval.</p>{{end}}
+{{range .Pending}}
+<section class="card" id="{{.ID}}">
+<h2>{{.Tool}}</h2>
+<p>{{.Summary}}</p>
+<dl>
+<dt>Target</dt><dd>{{if .TargetJID}}{{if .TargetName}}{{.TargetName}} {{end}}<code>{{.TargetJID}}</code>{{else}}account-level action{{end}}</dd>
+<dt>Created</dt><dd>{{.Created}}</dd>
+<dt>Expires</dt><dd>{{.Expires}}</dd>
+</dl>
+<pre>{{.Args}}</pre>
+<form method="post" action="/approvals/approve">
+<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Approve and run</button>
+</form>
+<form method="post" action="/approvals/reject">
+<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Reject</button>
+</form>
+</section>
+{{end}}
+<h2>Recent decisions</h2>
+{{if not .Recent}}<p>No decided actions yet.</p>{{else}}
+<table>
+<tr><th>Decided</th><th>Action</th><th>Status</th><th>Result</th></tr>
+{{range .Recent}}
+<tr>
+<td>{{.Decided}}</td>
+<td>{{.Summary}}</td>
+<td>{{.Status}}</td>
+<td>{{if .Result}}<pre>{{.Result}}</pre>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{end}}
+{{end}}

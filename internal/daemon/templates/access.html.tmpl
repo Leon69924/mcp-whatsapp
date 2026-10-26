@@ -1,0 +1,41 @@
+{{define "title"}}Read access{{end}}
+{{define "content"}}
+<h1>Read access</h1>
+<p class="muted">The model can read only the chats allowed here. With nothing allowed it can read nothing. Allowed chats are listed first.</p>
+<p><input type="search" id="filter" placeholder="Search by name or JID" size="40" autofocus></p>
+<table id="chats">
+<tr><th>Name</th><th>JID</th><th>Type</th><th>Last message</th><th></th></tr>
+{{range .Chats}}
+<tr data-search="{{.Search}}">
+<td>{{if .Name}}{{.Name}}{{else}}<span class="muted">(no name)</span>{{end}}</td>
+<td><code>{{.JID}}</code></td>
+<td>{{if .IsGroup}}group{{else}}direct{{end}}</td>
+<td>{{.LastMessage}}</td>
+<td>
+{{if .Allowed}}
+<form method="post" action="/access/remove">
+<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+<input type="hidden" name="chat_jid" value="{{.JID}}">
+<button type="submit">Remove</button>
+</form>
+{{else}}
+<form method="post" action="/access/allow">
+<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+<input type="hidden" name="chat_jid" value="{{.JID}}">
+<button type="submit">Allow</button>
+</form>
+{{end}}
+</td>
+</tr>
+{{end}}
+</table>
+{{if not .Chats}}<p>No chats are cached yet.</p>{{end}}
+<script>
+document.getElementById('filter').addEventListener('input', function (e) {
+  var needle = e.target.value.toLowerCase();
+  document.querySelectorAll('#chats tr[data-search]').forEach(function (row) {
+    row.hidden = needle !== '' && row.dataset.search.indexOf(needle) === -1;
+  });
+});
+</script>
+{{end}}

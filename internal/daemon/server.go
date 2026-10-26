@@ -34,7 +34,7 @@ type pairDriver interface {
 // mux is being built so the caller can attach additional handlers (in
 // practice, the /mcp Streamable HTTP handler from internal/mcp).
 //
-// AuthToken, if non-empty, gates /mcp and /pair/* behind the HTTP header
+// AuthToken, if non-empty, gates /mcp, /pair/*, /approvals/* and /access/* behind the HTTP header
 // `Authorization: Bearer <token>`. Loopback-bound operation passes an
 // empty token and leaves these routes unauthenticated.
 type Config struct {
@@ -48,6 +48,8 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	cache *PairCache
+	// operator serves /approvals and /access; nil when no backends were set.
+	operator *operatorHandlers
 
 	mu         sync.Mutex
 	httpServer *http.Server
@@ -75,6 +77,13 @@ func New(cfg Config) (*Server, error) {
 // daemon before wiring the cache into the MCP server.
 func (s *Server) Cache() *PairCache { return s.cache }
 
+// SetOperator installs the backends of the operator pages (/approvals and
+// /access). Like SetMCPMount, it must be called before Run; without it the
+// pages are not served.
+func (s *Server) SetOperator(approvals approvalBackend, access accessBackend) {
+	s.operator = newOperatorHandlers(approvals, access)
+}
+
 // SetMCPMount installs the MCP HTTP mount after construction. The daemon owns
 // the pair cache, so serve.go builds the daemon first, hands its cache to the
 // MCP server, then mounts the MCP handler here. cfg.MCPMount is read in Run,
@@ -100,6 +109,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	handlers := newPairHandlers(s.cache, s.cfg.Driver, coder)
 	handlers.mount(mux)
+	if s.operator != nil {
+		s.operator.mount(mux)
+	}
 	if s.cfg.MCPMount != nil {
 		s.cfg.MCPMount(mux)
 	} else {
@@ -208,8 +220,10 @@ func requiresAuth(path string) bool {
 	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
 		return true
 	}
-	if path == "/pair" || strings.HasPrefix(path, "/pair/") {
-		return true
+	for _, prefix := range []string{"/pair", "/approvals", "/access"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
 	}
 	return false
 }

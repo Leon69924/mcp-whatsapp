@@ -1,0 +1,23 @@
+{{define "base"}}<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>{{template "title" .}}</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:56rem;margin:2rem auto;padding:0 1rem}
+nav a{margin-right:1rem}
+section.card{border:1px solid #ccc;border-radius:6px;padding:0 1rem 1rem;margin:1rem 0}
+section.card:target{border-color:#06c}
+dl{display:grid;grid-template-columns:7rem 1fr;gap:.25rem 1rem}
+dt{font-weight:600}
+dd{margin:0}
+pre{background:#f4f4f4;padding:.75rem;overflow:auto;white-space:pre-wrap;word-break:break-word}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid #ddd;vertical-align:top}
+form{display:inline}
+code{word-break:break-all}
+.muted{color:#666}
+</style>
+</head><body>
+<nav><a href="/approvals">Approvals</a><a href="/access">Read access</a></nav>
+{{template "content" .}}
+</body></html>{{end}}
