@@ -55,6 +55,10 @@ type Message struct {
 	DirectPath  string `json:"direct_path,omitempty"`
 	ChatName    string `json:"chat_name,omitempty"`
 	PhoneNumber string `json:"phone_number,omitempty"`
+	// Quote is the reply context persisted with the message (ingest side).
+	Quote *Quote `json:"-"`
+	// ReplyTo is Quote rendered for MCP clients; set by the read queries.
+	ReplyTo *ReplyInfo `json:"reply_to,omitempty"`
 }
 
 // Chat is a cached WhatsApp chat.
@@ -172,12 +176,15 @@ func (s *Store) StoreMessage(ctx context.Context, m Message, mediaKey, fileSHA25
 	if m.Content == "" && m.MediaType == "" {
 		return nil
 	}
+	replyID, replySender, replyChat, replySnippet := quoteArgs(m.Quote)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO messages
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length,
+		 reply_to_id, reply_to_sender, reply_to_chat_jid, reply_to_snippet)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.ChatJID, m.Sender, m.Content, m.Timestamp, m.IsFromMe,
 		m.MediaType, m.Filename, m.URL, m.DirectPath, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		replyID, replySender, replyChat, replySnippet,
 	)
 	return err
 }
@@ -324,6 +331,10 @@ CREATE TABLE IF NOT EXISTS messages (
 	file_enc_sha256 BLOB,
 	file_length INTEGER,
 	poll_options_json TEXT,
+	reply_to_id TEXT,
+	reply_to_sender TEXT,
+	reply_to_chat_jid TEXT,
+	reply_to_snippet TEXT,
 	PRIMARY KEY (id, chat_jid),
 	FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 );
@@ -356,6 +367,17 @@ CREATE TABLE IF NOT EXISTS pending_actions (
 );
 `
 
+// addedMessageColumns are the messages columns added after the original
+// layout, in the order migrateSchema adds them to a legacy database.
+var addedMessageColumns = []struct{ name, sqlType string }{
+	{"poll_options_json", "TEXT"},
+	{"direct_path", "TEXT"},
+	{"reply_to_id", "TEXT"},
+	{"reply_to_sender", "TEXT"},
+	{"reply_to_chat_jid", "TEXT"},
+	{"reply_to_snippet", "TEXT"},
+}
+
 // migrateSchema brings legacy databases up to the current layout. SQLite lacks
 // "ADD COLUMN IF NOT EXISTS", so we inspect PRAGMA table_info before issuing
 // any ALTER. Every step is idempotent — running migrateSchema twice is a
@@ -366,8 +388,7 @@ func migrateSchema(db *sql.DB) error {
 		return fmt.Errorf("pragma table_info(messages): %w", err)
 	}
 	defer rows.Close()
-	hasPollOptions := false
-	hasDirectPath := false
+	present := map[string]bool{}
 	for rows.Next() {
 		var (
 			cid        int
@@ -380,24 +401,17 @@ func migrateSchema(db *sql.DB) error {
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &primaryKey); err != nil {
 			return fmt.Errorf("scan table_info(messages): %w", err)
 		}
-		if name == "poll_options_json" {
-			hasPollOptions = true
-		}
-		if name == "direct_path" {
-			hasDirectPath = true
-		}
+		present[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate table_info(messages): %w", err)
 	}
-	if !hasPollOptions {
-		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN poll_options_json TEXT"); err != nil {
-			return fmt.Errorf("add column poll_options_json: %w", err)
+	for _, col := range addedMessageColumns {
+		if present[col.name] {
+			continue
 		}
-	}
-	if !hasDirectPath {
-		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT"); err != nil {
-			return fmt.Errorf("add column direct_path: %w", err)
+		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN " + col.name + " " + col.sqlType); err != nil {
+			return fmt.Errorf("add column %s: %w", col.name, err)
 		}
 	}
 	return nil

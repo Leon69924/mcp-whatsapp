@@ -146,9 +146,11 @@ func (c *Client) SendReply(ctx context.Context, chatJID, targetMessageID, target
 		MessageContextInfo: c.ephemeralContextInfo(ctx, chat),
 	}
 
-	if _, err := c.wa.SendMessage(ctx, chat, msg); err != nil {
+	resp, err := c.wa.SendMessage(ctx, chat, msg)
+	if err != nil {
 		return fmt.Errorf("send reply: %w", err)
 	}
+	c.persistSent(ctx, chat, resp.ID, body, "", msg)
 	return nil
 }
 

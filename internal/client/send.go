@@ -367,6 +367,7 @@ func (c *Client) persistSent(ctx context.Context, recipientJID types.JID, msgID,
 		Filename:   storedFilename,
 		URL:        storedURL,
 		DirectPath: storedDirectPath,
+		Quote:      c.extractQuote(msg, chatJID),
 	}, storedMediaKey, storedFileSHA256, storedFileEnc, storedFileLength)
 	if err != nil {
 		c.log.Warnf("Failed to store sent message: %v", err)

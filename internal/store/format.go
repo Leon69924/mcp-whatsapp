@@ -38,6 +38,9 @@ func (s *Store) FormatMessage(ctx context.Context, m Message, showChatInfo bool)
 	b.WriteString(contentPrefix)
 	b.WriteString(m.Content)
 	b.WriteString("\n")
+	if m.ReplyTo != nil {
+		b.WriteString(formatReplyLine(m.ReplyTo))
+	}
 
 	return b.String()
 }
@@ -52,5 +55,27 @@ func (s *Store) FormatMessagesList(ctx context.Context, msgs []Message, showChat
 	for _, m := range msgs {
 		b.WriteString(s.FormatMessage(ctx, m, showChatInfo))
 	}
+	return b.String()
+}
+
+// formatReplyLine renders the quoted-message line shown under a reply.
+func formatReplyLine(r *ReplyInfo) string {
+	if r.Restricted {
+		return "  reply_to: a message in a chat that is not on the read allowlist\n"
+	}
+	var b strings.Builder
+	b.WriteString("  reply_to: ")
+	if r.Sender != "" {
+		b.WriteString(r.Sender + " ")
+	}
+	b.WriteString("(message ID: " + r.MessageID)
+	if r.ChatJID != "" {
+		b.WriteString(" - Chat JID: " + r.ChatJID)
+	}
+	b.WriteString(")")
+	if r.Snippet != "" {
+		b.WriteString(": " + r.Snippet)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
