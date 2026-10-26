@@ -122,6 +122,7 @@ func (c *Client) normalizeIncomingMessage(
 			Filename:   filename,
 			URL:        url,
 			DirectPath: directPath,
+			Quote:      c.extractQuote(raw, chatJID),
 		},
 		mediaKey:      mediaKey,
 		fileSHA256:    fileSHA256,
