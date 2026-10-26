@@ -1,41 +1,75 @@
 {{define "title"}}Read access{{end}}
 {{define "content"}}
 <h1>Read access</h1>
-<p class="muted">The model can read only the chats allowed here. With nothing allowed it can read nothing. Allowed chats are listed first.</p>
-<p><input type="search" id="filter" placeholder="Search by name or JID" size="40" autofocus></p>
+<p class="muted">The model can read only the chats ticked here. With nothing ticked it can read nothing. Tick the chats, then press Save: the saved selection replaces the whole list.</p>
+{{if ge .Saved 0}}<p role="status"><strong>Saved: {{.Saved}} chats allowed</strong></p>{{end}}
+{{if .NotConnected}}<p role="alert"><strong>WhatsApp is not connected.</strong> Groups you are in that have no cached message are missing from this list until it connects; reload then.</p>{{end}}
+<form method="post" action="/access/save" id="access-form" style="display:block" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<p>
+<input type="search" id="filter" placeholder="Search by name, number or JID" size="36" autofocus>
+<select id="type" aria-label="Chat type">
+<option value="">All</option>
+<option value="direct">Direct</option>
+<option value="group">Groups</option>
+</select>
+<label><input type="checkbox" id="only-selected"> only selected</label>
+</p>
+<p>
+<button type="button" id="select-visible">Select all visible</button>
+<button type="button" id="clear-visible">Clear visible</button>
+<span id="counter" class="muted"></span>
+<button type="submit">Save</button>
+</p>
 <table id="chats">
-<tr><th>Name</th><th>JID</th><th>Type</th><th>Last message</th><th></th></tr>
+<tr><th></th><th>Name</th><th>Number / JID</th><th>Type</th><th>Last message</th></tr>
 {{range .Chats}}
-<tr data-search="{{.Search}}">
+<tr data-search="{{.Search}}" data-type="{{if .IsGroup}}group{{else}}direct{{end}}">
+<td><input type="checkbox" name="chat_jid" value="{{.JID}}"{{if .Allowed}} checked{{end}} aria-label="Allow {{if .Name}}{{.Name}}{{else}}{{.JID}}{{end}}"></td>
 <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">(no name)</span>{{end}}</td>
-<td><code>{{.JID}}</code></td>
+<td>{{if .Phone}}{{.Phone}}<br>{{end}}<code>{{.JID}}</code></td>
 <td>{{if .IsGroup}}group{{else}}direct{{end}}</td>
 <td>{{.LastMessage}}</td>
-<td>
-{{if .Allowed}}
-<form method="post" action="/access/remove">
-<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-<input type="hidden" name="chat_jid" value="{{.JID}}">
-<button type="submit">Remove</button>
-</form>
-{{else}}
-<form method="post" action="/access/allow">
-<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-<input type="hidden" name="chat_jid" value="{{.JID}}">
-<button type="submit">Allow</button>
-</form>
-{{end}}
-</td>
 </tr>
 {{end}}
 </table>
-{{if not .Chats}}<p>No chats are cached yet.</p>{{end}}
+{{if not .Chats}}<p>No chats are known yet.</p>{{end}}
+</form>
 <script>
-document.getElementById('filter').addEventListener('input', function (e) {
-  var needle = e.target.value.toLowerCase();
-  document.querySelectorAll('#chats tr[data-search]').forEach(function (row) {
-    row.hidden = needle !== '' && row.dataset.search.indexOf(needle) === -1;
-  });
-});
+(function () {
+  var rows = Array.prototype.slice.call(document.querySelectorAll('#chats tr[data-search]'));
+  var filter = document.getElementById('filter');
+  var type = document.getElementById('type');
+  var onlySelected = document.getElementById('only-selected');
+  var counter = document.getElementById('counter');
+  function box(row) { return row.querySelector('input[type=checkbox]'); }
+  function updateCounter() {
+    var n = rows.filter(function (row) { return box(row).checked; }).length;
+    counter.textContent = n + ' selected';
+  }
+  // Hidden rows stay in the form with their checked state: a filter only sets
+  // the hidden attribute, never disabled.
+  function apply() {
+    var needle = filter.value.toLowerCase();
+    rows.forEach(function (row) {
+      row.hidden = (needle !== '' && row.dataset.search.indexOf(needle) === -1) ||
+        (type.value !== '' && row.dataset.type !== type.value) ||
+        (onlySelected.checked && !box(row).checked);
+    });
+  }
+  function setVisible(checked) {
+    rows.forEach(function (row) { if (!row.hidden) { box(row).checked = checked; } });
+    updateCounter();
+    apply();
+  }
+  filter.addEventListener('input', apply);
+  filter.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); } });
+  type.addEventListener('change', apply);
+  onlySelected.addEventListener('change', apply);
+  document.getElementById('select-visible').addEventListener('click', function () { setVisible(true); });
+  document.getElementById('clear-visible').addEventListener('click', function () { setVisible(false); });
+  document.getElementById('chats').addEventListener('change', function () { updateCounter(); });
+  updateCounter();
+})();
 </script>
 {{end}}

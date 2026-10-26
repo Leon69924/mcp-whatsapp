@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -193,7 +195,7 @@ func TestListAccessChats_AllowedFirstAndDanglingEntries(t *testing.T) {
 		}
 	}
 
-	chats, err := s.ListAccessChats(ctx)
+	chats, err := s.ListAccessChats(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListAccessChats: %v", err)
 	}
@@ -217,5 +219,157 @@ func TestAllowedChats_ClauseMatchesNothingWhenEmpty(t *testing.T) {
 	sql, args := AllowedChats{}.clause("c.jid")
 	if sql != "0 = 1" || len(args) != 0 {
 		t.Fatalf("empty clause = %q %v", sql, args)
+	}
+}
+
+func allowlistJIDs(t *testing.T, s *Store) []string {
+	t.Helper()
+	entries, err := s.ListReadAllowlist(context.Background())
+	if err != nil {
+		t.Fatalf("ListReadAllowlist: %v", err)
+	}
+	jids := make([]string, len(entries))
+	for i, e := range entries {
+		jids[i] = e.JID
+	}
+	sort.Strings(jids)
+	return jids
+}
+
+func TestReplaceReadAllowlist_ReplacesTheWholeSet(t *testing.T) {
+	s := openTestStore(t)
+	clearAllowlist(t, s)
+	ctx := context.Background()
+	for _, jid := range []string{"447700000001@s.whatsapp.net", "123456789@g.us"} {
+		if err := s.AddReadAllowlist(ctx, jid); err != nil {
+			t.Fatalf("AddReadAllowlist(%s): %v", jid, err)
+		}
+	}
+
+	// Bob arrives as a LID and is stored under the phone form; the group is dropped.
+	if err := s.ReplaceReadAllowlist(ctx, []string{"447700000001@s.whatsapp.net", "99887766@lid", "99887766:3@lid"}); err != nil {
+		t.Fatalf("ReplaceReadAllowlist: %v", err)
+	}
+	want := []string{"447700000001@s.whatsapp.net", "447700000002@s.whatsapp.net"}
+	if got := allowlistJIDs(t, s); !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowlist = %v; want %v", got, want)
+	}
+
+	if err := s.ReplaceReadAllowlist(ctx, nil); err != nil {
+		t.Fatalf("ReplaceReadAllowlist(empty): %v", err)
+	}
+	if got := allowlistJIDs(t, s); len(got) != 0 {
+		t.Fatalf("empty replace left %v; want deny-all", got)
+	}
+}
+
+func TestReplaceReadAllowlist_InvalidJIDChangesNothing(t *testing.T) {
+	s := openTestStore(t)
+	clearAllowlist(t, s)
+	ctx := context.Background()
+	if err := s.AddReadAllowlist(ctx, "447700000001@s.whatsapp.net"); err != nil {
+		t.Fatalf("AddReadAllowlist: %v", err)
+	}
+	if err := s.ReplaceReadAllowlist(ctx, []string{"123456789@g.us", "447700000002"}); err == nil {
+		t.Fatal("ReplaceReadAllowlist with a bare number: want an error")
+	}
+	if got := allowlistJIDs(t, s); !reflect.DeepEqual(got, []string{"447700000001@s.whatsapp.net"}) {
+		t.Fatalf("failed replace changed the allowlist to %v", got)
+	}
+}
+
+func TestReplaceReadAllowlist_KeepsAddedAtOfRetainedChats(t *testing.T) {
+	s := openTestStore(t)
+	clearAllowlist(t, s)
+	ctx := context.Background()
+	if _, err := s.db.Exec("INSERT INTO read_allowlist (chat_jid, added_at) VALUES ('447700000001@s.whatsapp.net', '2020-01-02 03:04:05')"); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	if err := s.ReplaceReadAllowlist(ctx, []string{"447700000001@s.whatsapp.net"}); err != nil {
+		t.Fatalf("ReplaceReadAllowlist: %v", err)
+	}
+	entries, err := s.ListReadAllowlist(ctx)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v, %v", entries, err)
+	}
+	if got := entries[0].AddedAt.UTC().Format("2006-01-02 15:04:05"); got != "2020-01-02 03:04:05" {
+		t.Fatalf("added_at = %s; want the original", got)
+	}
+}
+
+func TestListAccessChats_JoinedGroupsAndLIDDedupe(t *testing.T) {
+	s := openTestStore(t)
+	clearAllowlist(t, s)
+	ctx := context.Background()
+	// Bob has a phone-form chat (seeded) and a LID-form chat: one person, one row.
+	if _, err := s.db.Exec(
+		"INSERT INTO chats (jid, name, last_message_time) VALUES ('99887766@lid', '', '2099-01-01 00:00:00')"); err != nil {
+		t.Fatalf("insert lid chat: %v", err)
+	}
+	joined := []AccessChat{
+		{JID: "123456789@g.us", Name: "Cached group", IsGroup: true},
+		{JID: "555000111@g.us", Name: "Silent group", IsGroup: true},
+	}
+	chats, err := s.ListAccessChats(ctx, joined)
+	if err != nil {
+		t.Fatalf("ListAccessChats: %v", err)
+	}
+
+	count := map[string]int{}
+	byJID := map[string]AccessChat{}
+	for _, c := range chats {
+		count[c.JID]++
+		byJID[c.JID] = c
+	}
+	for jid, n := range count {
+		if n != 1 {
+			t.Fatalf("%s listed %d times; want once", jid, n)
+		}
+	}
+	if _, ok := byJID["99887766@lid"]; ok {
+		t.Fatal("the LID form of Bob must collapse into his phone JID")
+	}
+	bob := byJID["447700000002@s.whatsapp.net"]
+	if bob.Name == "" || bob.LastMessageTime.Year() != 2099 {
+		t.Fatalf("collapsed row = %+v; want Bob's name and the newer LID-chat activity", bob)
+	}
+	silent, ok := byJID["555000111@g.us"]
+	if !ok || !silent.IsGroup || !silent.LastMessageTime.IsZero() {
+		t.Fatalf("joined group without cached messages = %+v, %v", silent, ok)
+	}
+	if last := chats[len(chats)-1]; last.JID != "555000111@g.us" {
+		t.Fatalf("never-active group must sort last, got %s", last.JID)
+	}
+}
+
+func TestListAccessChats_DanglingGroupEntrySurvivesAndMergesWithLiveGroup(t *testing.T) {
+	s := openTestStore(t)
+	clearAllowlist(t, s)
+	ctx := context.Background()
+	if err := s.AddReadAllowlist(ctx, "555000111@g.us"); err != nil {
+		t.Fatalf("AddReadAllowlist: %v", err)
+	}
+	chats, err := s.ListAccessChats(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAccessChats: %v", err)
+	}
+	if chats[0].JID != "555000111@g.us" || !chats[0].Allowed {
+		t.Fatalf("offline: allowlisted group without chat row must stay listed first, got %+v", chats[0])
+	}
+	chats, err = s.ListAccessChats(ctx, []AccessChat{{JID: "555000111@g.us", Name: "Silent group", IsGroup: true}})
+	if err != nil {
+		t.Fatalf("ListAccessChats: %v", err)
+	}
+	n := 0
+	for _, c := range chats {
+		if c.JID == "555000111@g.us" {
+			n++
+			if !c.Allowed || c.Name != "Silent group" {
+				t.Fatalf("merged row = %+v", c)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("group listed %d times; want once", n)
 	}
 }
