@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +33,19 @@ type approvalBackend interface {
 	TargetName(jid string) string
 }
 
-// accessBackend is what the /access page needs. *store.Store satisfies it.
+// accessBackend is what the /access page needs from the cache. *store.Store
+// satisfies it.
 type accessBackend interface {
-	ListAccessChats(ctx context.Context) ([]store.AccessChat, error)
-	AddReadAllowlist(ctx context.Context, jid string) error
-	RemoveReadAllowlist(ctx context.Context, jid string) error
+	ListAccessChats(ctx context.Context, extra []store.AccessChat) ([]store.AccessChat, error)
+	ReplaceReadAllowlist(ctx context.Context, jids []string) error
+}
+
+// groupsBackend lists the groups the account is in, straight from WhatsApp and
+// regardless of the read allowlist. *client.Client satisfies it; it must only
+// ever be wired to the operator page.
+type groupsBackend interface {
+	IsConnected() bool
+	OperatorJoinedGroups(ctx context.Context) ([]store.AccessChat, error)
 }
 
 // operatorHandlers serves the human-only operator pages: /approvals decides
@@ -44,12 +53,13 @@ type accessBackend interface {
 type operatorHandlers struct {
 	approvals     approvalBackend
 	access        accessBackend
+	groups        groupsBackend
 	approvalsCSRF csrfGuard
 	accessCSRF    csrfGuard
 }
 
-func newOperatorHandlers(approvals approvalBackend, access accessBackend) *operatorHandlers {
-	return &operatorHandlers{approvals: approvals, access: access}
+func newOperatorHandlers(approvals approvalBackend, access accessBackend, groups groupsBackend) *operatorHandlers {
+	return &operatorHandlers{approvals: approvals, access: access, groups: groups}
 }
 
 func (h *operatorHandlers) mount(mux *http.ServeMux) {
@@ -57,8 +67,7 @@ func (h *operatorHandlers) mount(mux *http.ServeMux) {
 	mux.HandleFunc("/approvals/approve", h.handleApprove)
 	mux.HandleFunc("/approvals/reject", h.handleReject)
 	mux.HandleFunc("/access", h.handleAccessPage)
-	mux.HandleFunc("/access/allow", h.handleAllow)
-	mux.HandleFunc("/access/remove", h.handleRemove)
+	mux.HandleFunc("/access/save", h.handleAccessSave)
 }
 
 // actionView is one queued or decided action as the approvals page shows it.
@@ -231,7 +240,9 @@ func (h *operatorHandlers) handleReject(w http.ResponseWriter, r *http.Request) 
 
 // accessRow is one chat as the access page shows it.
 type accessRow struct {
-	JID         string
+	JID string
+	// Phone is the "+<number>" of a phone-addressed chat, empty otherwise.
+	Phone       string
 	Name        string
 	IsGroup     bool
 	Allowed     bool
@@ -243,24 +254,65 @@ type accessRow struct {
 type accessPageData struct {
 	CSRFToken string
 	Chats     []accessRow
+	// Allowed is how many rows start out checked.
+	Allowed int
+	// Saved is the allowlist size reported after a save, -1 when the page was
+	// not reached through one.
+	Saved int
+	// NotConnected is set when the live group list could not be fetched, so
+	// groups without a cached message are missing from Chats.
+	NotConnected bool
+}
+
+// loadAccessChats returns the chats the page offers: the cached ones plus the
+// live joined groups. connected is false when WhatsApp is not connected and
+// only the cache could be listed.
+func (h *operatorHandlers) loadAccessChats(ctx context.Context) (chats []store.AccessChat, connected bool, err error) {
+	var joined []store.AccessChat
+	if h.groups.IsConnected() {
+		connected = true
+		if joined, err = h.groups.OperatorJoinedGroups(ctx); err != nil {
+			return nil, false, err
+		}
+	}
+	chats, err = h.access.ListAccessChats(ctx, joined)
+	if err != nil {
+		return nil, false, err
+	}
+	return chats, connected, nil
 }
 
 func (h *operatorHandlers) handleAccessPage(w http.ResponseWriter, r *http.Request) {
-	chats, err := h.access.ListAccessChats(r.Context())
+	chats, connected, err := h.loadAccessChats(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	data := accessPageData{CSRFToken: h.accessCSRF.generate(), Chats: make([]accessRow, 0, len(chats))}
+	data := accessPageData{
+		CSRFToken:    h.accessCSRF.generate(),
+		Chats:        make([]accessRow, 0, len(chats)),
+		Saved:        -1,
+		NotConnected: !connected,
+	}
+	if saved, err := strconv.Atoi(r.URL.Query().Get("saved")); err == nil && saved >= 0 {
+		data.Saved = saved
+	}
 	for _, c := range chats {
-		data.Chats = append(data.Chats, accessRow{
+		row := accessRow{
 			JID:         c.JID,
 			Name:        c.Name,
 			IsGroup:     c.IsGroup,
 			Allowed:     c.Allowed,
 			LastMessage: formatTime(c.LastMessageTime),
-			Search:      strings.ToLower(c.Name + " " + c.JID),
-		})
+		}
+		if user, ok := strings.CutSuffix(c.JID, "@s.whatsapp.net"); ok {
+			row.Phone = "+" + user
+		}
+		row.Search = strings.ToLower(c.Name + " " + row.Phone + " " + c.JID)
+		if c.Allowed {
+			data.Allowed++
+		}
+		data.Chats = append(data.Chats, row)
 	}
 	pageHeaders(w)
 	if err := accessTmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -268,26 +320,42 @@ func (h *operatorHandlers) handleAccessPage(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (h *operatorHandlers) changeAccess(w http.ResponseWriter, r *http.Request, run func(context.Context, string) error) {
+// handleAccessSave replaces the whole read allowlist with the checked chats.
+// Every submitted JID must be a chat the page offers, so a forged or stale form
+// cannot allowlist something the operator was never shown.
+func (h *operatorHandlers) handleAccessSave(w http.ResponseWriter, r *http.Request) {
 	if !guardPost(w, r, &h.accessCSRF) {
 		return
 	}
-	jid := r.FormValue("chat_jid")
-	if jid == "" {
-		http.Error(w, "chat_jid: required", http.StatusBadRequest)
+	chats, _, err := h.loadAccessChats(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := run(r.Context(), jid); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	offered := make(map[string]struct{}, len(chats))
+	for _, c := range chats {
+		offered[c.JID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(r.PostForm["chat_jid"]))
+	var jids, unknown []string
+	for _, jid := range r.PostForm["chat_jid"] {
+		if _, dup := seen[jid]; dup {
+			continue
+		}
+		seen[jid] = struct{}{}
+		if _, ok := offered[jid]; !ok {
+			unknown = append(unknown, jid)
+			continue
+		}
+		jids = append(jids, jid)
+	}
+	if len(unknown) > 0 {
+		http.Error(w, "chat_jid: not a known chat: "+strings.Join(unknown, ", "), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, "/access", http.StatusSeeOther)
-}
-
-func (h *operatorHandlers) handleAllow(w http.ResponseWriter, r *http.Request) {
-	h.changeAccess(w, r, h.access.AddReadAllowlist)
-}
-
-func (h *operatorHandlers) handleRemove(w http.ResponseWriter, r *http.Request) {
-	h.changeAccess(w, r, h.access.RemoveReadAllowlist)
+	if err := h.access.ReplaceReadAllowlist(r.Context(), jids); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/access?saved="+strconv.Itoa(len(jids)), http.StatusSeeOther)
 }

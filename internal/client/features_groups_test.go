@@ -142,6 +142,12 @@ func TestListJoinedGroups_NotConnected(t *testing.T) {
 	assertNotConnected(t, err)
 }
 
+func TestOperatorJoinedGroups_NotConnected(t *testing.T) {
+	c := newDisconnectedClient()
+	_, err := c.OperatorJoinedGroups(context.Background())
+	assertNotConnected(t, err)
+}
+
 func TestGetGroupInfoJSON_NotConnected(t *testing.T) {
 	c := newDisconnectedClient()
 	_, err := c.GetGroupInfoJSON(context.Background(), "123@g.us")

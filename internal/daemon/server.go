@@ -80,8 +80,8 @@ func (s *Server) Cache() *PairCache { return s.cache }
 // SetOperator installs the backends of the operator pages (/approvals and
 // /access). Like SetMCPMount, it must be called before Run; without it the
 // pages are not served.
-func (s *Server) SetOperator(approvals approvalBackend, access accessBackend) {
-	s.operator = newOperatorHandlers(approvals, access)
+func (s *Server) SetOperator(approvals approvalBackend, access accessBackend, groups groupsBackend) {
+	s.operator = newOperatorHandlers(approvals, access, groups)
 }
 
 // SetMCPMount installs the MCP HTTP mount after construction. The daemon owns
