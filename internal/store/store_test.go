@@ -286,6 +286,17 @@ func TestMigrateSchema_AddsDirectPath(t *testing.T) {
 		t.Error("legacy row url should have survived migration")
 	}
 
+	// The reply_to_* columns are added too, and a legacy row is not a reply.
+	var replyID sql.NullString
+	if err := s.db.QueryRow(
+		"SELECT reply_to_id FROM messages WHERE id = ?", "legacy-1",
+	).Scan(&replyID); err != nil {
+		t.Fatalf("select reply_to_id after migration: %v", err)
+	}
+	if replyID.Valid {
+		t.Errorf("legacy row reply_to_id should be NULL, got %q", replyID.String)
+	}
+
 	// Second Open must be a no-op — verifies migrateSchema is idempotent.
 	s.Close()
 	s2, err := Open(dir)
