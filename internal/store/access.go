@@ -211,10 +211,68 @@ func (s *Store) DisplayName(jid string) string {
 	return s.FindChatName(jid)
 }
 
-// ListAccessChats returns every known chat with its allowlist state, allowed
-// chats first and each group ordered by most recent activity. Allowlist entries
-// without a cached chat are included so the operator can still remove them.
-func (s *Store) ListAccessChats(ctx context.Context) ([]AccessChat, error) {
+// ReplaceReadAllowlist makes jids the whole read allowlist in one transaction:
+// every other entry is removed, so an empty slice denies everything. Each JID
+// is stored in its canonical form, and chats that stay allowlisted keep their
+// original added_at. Either the whole replacement is applied or none of it.
+func (s *Store) ReplaceReadAllowlist(ctx context.Context, jids []string) error {
+	canonical := make([]string, 0, len(jids))
+	seen := make(map[string]struct{}, len(jids))
+	for _, jid := range jids {
+		c, err := s.canonicalAllowlistJID(jid)
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		canonical = append(canonical, c)
+	}
+
+	entries, err := s.ListReadAllowlist(ctx)
+	if err != nil {
+		return err
+	}
+	addedAt := make(map[string]time.Time, len(entries))
+	for _, e := range entries {
+		addedAt[s.ResolveLIDToJID(e.JID)] = e.AddedAt
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("replace read allowlist: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM read_allowlist"); err != nil {
+		return fmt.Errorf("replace read allowlist: clear: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, jid := range canonical {
+		at, ok := addedAt[jid]
+		if !ok || at.IsZero() {
+			at = now
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO read_allowlist (chat_jid, added_at) VALUES (?, ?)", jid, at,
+		); err != nil {
+			return fmt.Errorf("replace read allowlist: insert %s: %w", jid, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("replace read allowlist: commit: %w", err)
+	}
+	return nil
+}
+
+// ListAccessChats returns every chat the operator can allow, one row per
+// canonical JID, with its allowlist state: the cached chats, the extra chats the
+// caller knows about (the groups the account is in, which may have no cached
+// message) and allowlist entries without any chat, so the operator can still
+// remove them. The @lid and phone forms of one person collapse into one row
+// under the phone JID. Allowed chats come first, then the most recently active;
+// chats that never had a message come last.
+func (s *Store) ListAccessChats(ctx context.Context, extra []AccessChat) ([]AccessChat, error) {
 	allowed, err := s.AllowedChats(ctx)
 	if err != nil {
 		return nil, err
@@ -228,8 +286,7 @@ func (s *Store) ListAccessChats(ctx context.Context) ([]AccessChat, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list access chats: %w", err)
 	}
-	var chats []AccessChat
-	known := map[string]struct{}{}
+	var candidates []AccessChat
 	for rows.Next() {
 		var (
 			c        AccessChat
@@ -242,10 +299,7 @@ func (s *Store) ListAccessChats(ctx context.Context) ([]AccessChat, error) {
 		}
 		c.Name = name.String
 		c.LastMessageTime = lastTime.Time
-		c.IsGroup = strings.HasSuffix(c.JID, "@g.us")
-		c.Allowed = allowed.Has(c.JID)
-		known[stripDevice(c.JID)] = struct{}{}
-		chats = append(chats, c)
+		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -253,26 +307,32 @@ func (s *Store) ListAccessChats(ctx context.Context) ([]AccessChat, error) {
 	}
 	rows.Close()
 
-	for i := range chats {
-		if name := s.ContactName(chats[i].JID); name != "" && !chats[i].IsGroup {
-			chats[i].Name = name
-		}
-	}
+	candidates = append(candidates, extra...)
 	for _, e := range entries {
-		matched := false
-		for _, form := range s.jidForms(e.JID) {
-			if _, ok := known[form]; ok {
-				matched = true
-				break
-			}
+		candidates = append(candidates, AccessChat{JID: e.JID, Name: s.DisplayName(e.JID)})
+	}
+
+	byJID := make(map[string]int, len(candidates))
+	chats := make([]AccessChat, 0, len(candidates))
+	for _, c := range candidates {
+		c.IsGroup = strings.HasSuffix(c.JID, "@g.us")
+		if name := s.ContactName(c.JID); name != "" && !c.IsGroup {
+			c.Name = name
 		}
-		if !matched {
-			chats = append(chats, AccessChat{
-				JID:     e.JID,
-				Name:    s.DisplayName(e.JID),
-				IsGroup: strings.HasSuffix(e.JID, "@g.us"),
-				Allowed: true,
-			})
+		c.JID = s.ResolveLIDToJID(stripDevice(c.JID))
+		c.Allowed = allowed.Has(c.JID)
+		i, ok := byJID[c.JID]
+		if !ok {
+			byJID[c.JID] = len(chats)
+			chats = append(chats, c)
+			continue
+		}
+		merged := &chats[i]
+		if merged.Name == "" {
+			merged.Name = c.Name
+		}
+		if c.LastMessageTime.After(merged.LastMessageTime) {
+			merged.LastMessageTime = c.LastMessageTime
 		}
 	}
 	sort.SliceStable(chats, func(i, j int) bool {

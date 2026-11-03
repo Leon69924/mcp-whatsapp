@@ -13,6 +13,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+
+	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
 
 // errChatNotReadable refuses a live read of a chat that is not on the read
@@ -74,15 +76,25 @@ func (c *Client) LeaveGroup(ctx context.Context, chatJID string) error {
 	return nil
 }
 
-// ListJoinedGroups returns JSON of the groups the user is in that are on the
-// read allowlist.
-func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
+// joinedGroups fetches the groups the account is in from WhatsApp, unfiltered.
+// It is private: every exported reader decides what of it may leave the package.
+func (c *Client) joinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
 	if !c.wa.IsConnected() {
-		return "", errors.New("not connected to WhatsApp")
+		return nil, errors.New("not connected to WhatsApp")
 	}
 	groups, err := c.wa.GetJoinedGroups(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list joined groups: %w", err)
+		return nil, fmt.Errorf("list joined groups: %w", err)
+	}
+	return groups, nil
+}
+
+// ListJoinedGroups returns JSON of the groups the user is in that are on the
+// read allowlist.
+func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
+	groups, err := c.joinedGroups(ctx)
+	if err != nil {
+		return "", err
 	}
 	allowed, err := c.store.AllowedChats(ctx)
 	if err != nil {
@@ -99,6 +111,23 @@ func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("marshal groups: %w", err)
 	}
 	return string(b), nil
+}
+
+// OperatorJoinedGroups lists every group the account is in, whether or not it
+// is on the read allowlist, so the operator's /access page can offer groups
+// that have no cached message. It is for the operator page only: it bypasses
+// the read allowlist, so no MCP tool may call it
+// (TestMCPPackageDoesNotReachOperatorAccessors guards that).
+func (c *Client) OperatorJoinedGroups(ctx context.Context) ([]store.AccessChat, error) {
+	groups, err := c.joinedGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	chats := make([]store.AccessChat, len(groups))
+	for i, g := range groups {
+		chats[i] = store.AccessChat{JID: g.JID.String(), Name: g.Name, IsGroup: true}
+	}
+	return chats, nil
 }
 
 // GetGroupInfoJSON returns a JSON-encoded types.GroupInfo for the given chat.
