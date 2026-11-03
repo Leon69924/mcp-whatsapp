@@ -42,8 +42,8 @@ func TestAction_PendingApprovedExecutedExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimAction: %v", err)
 	}
-	if claimed.Status != ActionExecuting || claimed.ArgsJSON != got.ArgsJSON || claimed.DecidedAt.IsZero() {
-		t.Fatalf("claimed = %+v; want executing with the stored args and a decision time", claimed)
+	if claimed.Status != ActionExecuting || claimed.ArgsJSON != got.ArgsJSON || claimed.DecidedAt.IsZero() || claimed.DecidedVia != DecidedByOperator {
+		t.Fatalf("claimed = %+v; want executing with the stored args, a decision time and the operator as decider", claimed)
 	}
 
 	// A second approval must not run the action again.
@@ -97,14 +97,51 @@ func TestAction_RejectedNeverExecutes(t *testing.T) {
 		t.Fatalf("RejectAction: %v", err)
 	}
 	got, _ := s.GetAction(ctx, "act1")
-	if got.Status != ActionRejected {
-		t.Fatalf("status = %s; want rejected", got.Status)
+	if got.Status != ActionRejected || got.DecidedVia != DecidedByOperator {
+		t.Fatalf("action = %+v; want rejected by the operator", got)
 	}
 	if _, err := s.ClaimAction(ctx, "act1", actionEpoch.Add(2*time.Minute)); !errors.Is(err, ErrActionNotPending) {
 		t.Fatalf("ClaimAction after reject error = %v; want ErrActionNotPending", err)
 	}
 	if err := s.RejectAction(ctx, "act1", actionEpoch.Add(2*time.Minute)); !errors.Is(err, ErrActionNotPending) {
 		t.Fatalf("second RejectAction error = %v; want ErrActionNotPending", err)
+	}
+}
+
+// An action decided in the MCP client is stored already decided, and its ID —
+// the confirmation's nonce — can be recorded only once.
+func TestAction_ClientDecisionsAreRecordedOnce(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	decided := actionEpoch.Add(time.Minute)
+	base := PendingAction{
+		Tool: "send_message", ArgsJSON: `{}`, Summary: "s", TargetJID: "447700000001@s.whatsapp.net",
+		CreatedAt: actionEpoch, ExpiresAt: actionEpoch.Add(time.Hour),
+	}
+	for id, status := range map[string]string{"confirmed": ActionExecuting, "declined": ActionRejected} {
+		a := base
+		a.ID = id
+		if err := s.CreateDecidedAction(ctx, a, status, decided); err != nil {
+			t.Fatalf("CreateDecidedAction(%s): %v", id, err)
+		}
+		got, err := s.GetAction(ctx, id)
+		if err != nil || got.Status != status || got.DecidedVia != DecidedInClient || !got.DecidedAt.Equal(decided) {
+			t.Fatalf("%s = %+v, %v; want %s, decided in the client at %s", id, got, err, status, decided)
+		}
+		if err := s.CreateDecidedAction(ctx, a, status, decided); !errors.Is(err, ErrActionExists) {
+			t.Fatalf("second CreateDecidedAction(%s) error = %v; want ErrActionExists", id, err)
+		}
+	}
+	if err := s.FinishAction(ctx, "confirmed", ActionExecuted, `{"is_error":false,"text":"ok"}`); err != nil {
+		t.Fatalf("FinishAction: %v", err)
+	}
+	if pending, err := s.ListPendingActions(ctx, decided); err != nil || len(pending) != 0 {
+		t.Fatalf("client decisions surfaced as pending: %+v, %v", pending, err)
+	}
+	invalid := base
+	invalid.ID = "pending"
+	if err := s.CreateDecidedAction(ctx, invalid, ActionPending, decided); err == nil {
+		t.Fatal("CreateDecidedAction with status pending: want an error")
 	}
 }
 

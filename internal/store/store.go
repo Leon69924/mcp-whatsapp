@@ -363,13 +363,17 @@ CREATE TABLE IF NOT EXISTS pending_actions (
 	created_at TIMESTAMP NOT NULL,
 	expires_at TIMESTAMP NOT NULL,
 	decided_at TIMESTAMP,
-	result_json TEXT
+	result_json TEXT,
+	decided_via TEXT
 );
 `
 
+// addedColumn is a column added to a table after its original layout.
+type addedColumn struct{ name, sqlType string }
+
 // addedMessageColumns are the messages columns added after the original
 // layout, in the order migrateSchema adds them to a legacy database.
-var addedMessageColumns = []struct{ name, sqlType string }{
+var addedMessageColumns = []addedColumn{
 	{"poll_options_json", "TEXT"},
 	{"direct_path", "TEXT"},
 	{"reply_to_id", "TEXT"},
@@ -378,14 +382,29 @@ var addedMessageColumns = []struct{ name, sqlType string }{
 	{"reply_to_snippet", "TEXT"},
 }
 
-// migrateSchema brings legacy databases up to the current layout. SQLite lacks
-// "ADD COLUMN IF NOT EXISTS", so we inspect PRAGMA table_info before issuing
-// any ALTER. Every step is idempotent — running migrateSchema twice is a
-// no-op on an up-to-date DB.
+// addedActionColumns are the pending_actions columns added after the approval
+// queue first shipped.
+var addedActionColumns = []addedColumn{
+	{"decided_via", "TEXT"},
+}
+
+// migrateSchema brings legacy databases up to the current layout. It runs
+// after schema, so every table exists; what an older database lacks are the
+// columns added since. SQLite lacks "ADD COLUMN IF NOT EXISTS", so we inspect
+// PRAGMA table_info before issuing any ALTER. Every step is idempotent —
+// running migrateSchema twice is a no-op on an up-to-date DB.
 func migrateSchema(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(messages)")
+	if err := addMissingColumns(db, "messages", addedMessageColumns); err != nil {
+		return err
+	}
+	return addMissingColumns(db, "pending_actions", addedActionColumns)
+}
+
+// addMissingColumns adds every column in cols that table does not have yet.
+func addMissingColumns(db *sql.DB, table string, cols []addedColumn) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
-		return fmt.Errorf("pragma table_info(messages): %w", err)
+		return fmt.Errorf("pragma table_info(%s): %w", table, err)
 	}
 	defer rows.Close()
 	present := map[string]bool{}
@@ -399,19 +418,19 @@ func migrateSchema(db *sql.DB) error {
 			primaryKey int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &primaryKey); err != nil {
-			return fmt.Errorf("scan table_info(messages): %w", err)
+			return fmt.Errorf("scan table_info(%s): %w", table, err)
 		}
 		present[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate table_info(messages): %w", err)
+		return fmt.Errorf("iterate table_info(%s): %w", table, err)
 	}
-	for _, col := range addedMessageColumns {
+	for _, col := range cols {
 		if present[col.name] {
 			continue
 		}
-		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN " + col.name + " " + col.sqlType); err != nil {
-			return fmt.Errorf("add column %s: %w", col.name, err)
+		if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col.name + " " + col.sqlType); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", table, col.name, err)
 		}
 	}
 	return nil

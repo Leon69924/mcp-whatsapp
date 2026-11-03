@@ -34,14 +34,18 @@ type pairDriver interface {
 // mux is being built so the caller can attach additional handlers (in
 // practice, the /mcp Streamable HTTP handler from internal/mcp).
 //
-// AuthToken, if non-empty, gates /mcp, /pair/*, /approvals/* and /access/* behind the HTTP header
-// `Authorization: Bearer <token>`. Loopback-bound operation passes an
-// empty token and leaves these routes unauthenticated.
+// AuthToken, if non-empty, gates /mcp behind the HTTP header
+// `Authorization: Bearer <token>`. Remote marks a non-loopback bind
+// (-allow-remote): it requires AuthToken, which then also gates /pair/*,
+// /approvals/* and /access/*. On loopback the operator pages stay without a
+// token, because the browser cannot attach one; the loopback Host check and
+// CSRF guard them instead.
 type Config struct {
 	Addr      string
 	Driver    pairDriver
 	MCPMount  func(mux *http.ServeMux)
 	AuthToken string
+	Remote    bool
 }
 
 // Server is the long-lived daemon process. Safe for a single Run call.
@@ -64,6 +68,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Driver == nil {
 		return nil, errors.New("daemon.New: Driver required")
+	}
+	if cfg.Remote && cfg.AuthToken == "" {
+		return nil, errors.New("daemon.New: a remote bind requires AuthToken")
 	}
 	return &Server{
 		cfg:        cfg,
@@ -121,8 +128,8 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	rootHandler := authMiddleware(mux, s.cfg.AuthToken)
-	if s.cfg.AuthToken == "" {
+	rootHandler := authMiddleware(mux, s.cfg.AuthToken, s.cfg.Remote)
+	if !s.cfg.Remote {
 		rootHandler = loopbackHostMiddleware(rootHandler, s.BoundAddr)
 	}
 
@@ -202,10 +209,11 @@ func (s *Server) onLoggedOut(ctx context.Context) func() {
 }
 
 // loopbackHostMiddleware refuses requests whose Host header is not a loopback
-// name for the bound port. Without a bearer token the daemon trusts loopback
-// alone, and a DNS-rebinding page (attacker.example resolving to 127.0.0.1)
-// would otherwise be same-origin with /mcp, /approvals and /access. With a
-// token, the browser cannot attach it, so authMiddleware already covers this.
+// name for the bound port. On loopback the operator pages carry no bearer
+// token, and a DNS-rebinding page (attacker.example resolving to 127.0.0.1)
+// would otherwise be same-origin with /mcp, /approvals and /access. On a
+// remote bind every one of those routes needs the token, which the browser
+// cannot attach, so authMiddleware already covers this.
 func loopbackHostMiddleware(next http.Handler, boundAddr func() string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, port, err := net.SplitHostPort(r.Host)
@@ -227,13 +235,15 @@ func loopbackHostMiddleware(next http.Handler, boundAddr func() string) http.Han
 	})
 }
 
-func authMiddleware(next http.Handler, token string) http.Handler {
+// authMiddleware requires `Authorization: Bearer <token>`, compared in constant
+// time, on every path requiresAuth names for this bind.
+func authMiddleware(next http.Handler, token string, remote bool) http.Handler {
 	if token == "" {
 		return next
 	}
 	expected := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requiresAuth(r.URL.Path) {
+		if requiresAuth(r.URL.Path, remote) {
 			got := r.Header.Get("Authorization")
 			if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="whatsapp-mcp"`)
@@ -245,9 +255,14 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 	})
 }
 
-func requiresAuth(path string) bool {
+// requiresAuth reports whether path needs the bearer token: /mcp always, the
+// pairing and operator pages only on a remote bind.
+func requiresAuth(path string, remote bool) bool {
 	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
 		return true
+	}
+	if !remote {
+		return false
 	}
 	for _, prefix := range []string{"/pair", "/approvals", "/access"} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {

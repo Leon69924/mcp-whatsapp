@@ -306,6 +306,41 @@ func TestMigrateSchema_AddsDirectPath(t *testing.T) {
 	defer s2.Close()
 }
 
+// TestMigrateSchema_AddsDecidedVia: a pending_actions table from before
+// decisions recorded who made them gains decided_via on Open; its rows keep
+// their state and read as decided by nobody.
+func TestMigrateSchema_AddsDecidedVia(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatalf("open legacy DB: %v", err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE pending_actions (
+			id TEXT PRIMARY KEY, tool TEXT NOT NULL, args_json TEXT NOT NULL,
+			summary TEXT NOT NULL, target_jid TEXT NOT NULL, status TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL,
+			decided_at TIMESTAMP, result_json TEXT
+		);
+		INSERT INTO pending_actions (id, tool, args_json, summary, target_jid, status, created_at, expires_at)
+		VALUES ('old', 'send_message', '{}', 's', '', 'pending', '2026-01-01 09:00:00', '2999-01-01 09:00:00');
+	`)
+	if err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	_ = legacy.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	got, err := s.GetAction(context.Background(), "old")
+	if err != nil || got.Status != ActionPending || got.DecidedVia != "" {
+		t.Fatalf("legacy action after migration = %+v, %v; want pending, decided by nobody", got, err)
+	}
+}
+
 func TestHasInboundFrom(t *testing.T) {
 	s := openTestStore(t)
 

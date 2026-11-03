@@ -26,11 +26,27 @@ type harness struct {
 	t    *testing.T
 	cmd  *exec.Cmd
 	addr string
+	// token, when set, is the daemon's bearer token; callToolModern sends it.
+	token string
 }
 
 // newHarness starts a daemon on a fresh store. Every JID in allowRead is put on
 // the read allowlist first, because the default is that nothing is readable.
 func newHarness(t *testing.T, allowRead ...string) *harness {
+	t.Helper()
+	return startHarness(t, "", nil, allowRead)
+}
+
+// newConfirmHarness starts a daemon with a bearer token on /mcp and
+// confirmation in the client enabled (WHATSAPP_MCP_CLIENT_CONFIRM=1).
+func newConfirmHarness(t *testing.T) *harness {
+	t.Helper()
+	const token = "e2e-token"
+	return startHarness(t, token, []string{"WHATSAPP_MCP_TOKEN=" + token, "WHATSAPP_MCP_CLIENT_CONFIRM=1"}, nil)
+}
+
+// startHarness runs the daemon with env added to the test's environment.
+func startHarness(t *testing.T, token string, env, allowRead []string) *harness {
 	t.Helper()
 	repo := repoRoot(t)
 	bin := filepath.Join(repo, "bin", "whatsapp-mcp")
@@ -50,13 +66,14 @@ func newHarness(t *testing.T, allowRead ...string) *harness {
 	}
 
 	cmd := exec.Command(bin, "-store", storeDir, "serve", "-addr", addr)
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start daemon: %v", err)
 	}
 
-	h := &harness{t: t, cmd: cmd, addr: addr}
+	h := &harness{t: t, cmd: cmd, addr: addr, token: token}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
 	h.waitForReady(5 * time.Second)
@@ -226,4 +243,81 @@ func (h *harness) initializeMCP() {
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 		h.t.Fatalf("stateless server minted Mcp-Session-Id %q", sid)
 	}
+}
+
+// modernResult is a 2026-07-28 tools/call result, including the input request
+// a gated tool answers with when the client can confirm.
+type modernResult struct {
+	ResultType    string `json:"resultType"`
+	RequestState  string `json:"requestState"`
+	IsError       bool   `json:"isError"`
+	InputRequests map[string]struct {
+		Method string `json:"method"`
+		Params struct {
+			Message string `json:"message"`
+		} `json:"params"`
+	} `json:"inputRequests"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func (r modernResult) text() string {
+	if len(r.Content) == 0 {
+		return ""
+	}
+	return r.Content[0].Text
+}
+
+// callToolModern POSTs a 2026-07-28 tools/call (no initialize; version and
+// client capabilities in _meta) with the harness's bearer token, if any. When
+// roundTrip is non-nil it is merged into params, carrying requestState and
+// inputResponses of a retry.
+func (h *harness) callToolModern(name string, args, caps, roundTrip map[string]any) modernResult {
+	h.t.Helper()
+	resp, raw := h.postModern(name, args, caps, roundTrip, h.token)
+	if resp.StatusCode != http.StatusOK {
+		h.t.Fatalf("tools/call %s: status %d: %s", name, resp.StatusCode, raw)
+	}
+	var envelope struct {
+		Result *modernResult `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Result == nil {
+		h.t.Fatalf("tools/call %s: undecodable result %s (%v)", name, raw, err)
+	}
+	return *envelope.Result
+}
+
+// postModern sends the request behind callToolModern with the given bearer
+// token ("" sends none) and returns the raw response.
+func (h *harness) postModern(name string, args, caps, roundTrip map[string]any, token string) (*http.Response, []byte) {
+	h.t.Helper()
+	params := map[string]any{
+		"name":      name,
+		"arguments": args,
+		"_meta": map[string]any{
+			"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+			"io.modelcontextprotocol/clientCapabilities": caps,
+		},
+	}
+	for k, v := range roundTrip {
+		params[k] = v
+	}
+	buf, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
+	req, _ := http.NewRequest(http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "tools/call")
+	req.Header.Set("Mcp-Name", name)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatalf("POST tools/call: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp, raw
 }

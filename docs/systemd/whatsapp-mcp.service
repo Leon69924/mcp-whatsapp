@@ -3,6 +3,8 @@
 # 1. Copy this file to ~/.config/systemd/user/whatsapp-mcp.service
 # 2. Replace {{PATH_TO_REPO}} and {{STORE_DIR}} with absolute paths.
 # 3. (Optional) adjust WHATSAPP_MCP_ADDR / WHATSAPP_MCP_MEDIA_ROOT / WHATSAPP_MCP_DEBUG.
+#    For confirmation in the MCP client, uncomment the two lines below; the
+#    token file (mode 0600) is the one the client's headersHelper reads.
 # 4. systemctl --user daemon-reload
 # 5. systemctl --user enable --now whatsapp-mcp
 # 6. On first install, open http://127.0.0.1:8765/pair in a browser.
@@ -16,6 +18,8 @@ Type=exec
 ExecStart={{PATH_TO_REPO}}/bin/whatsapp-mcp -store {{STORE_DIR}} serve
 Environment=WHATSAPP_MCP_ADDR=127.0.0.1:8765
 Environment=WHATSAPP_MCP_MEDIA_ROOT={{STORE_DIR}}/uploads
+#Environment=WHATSAPP_MCP_TOKEN_FILE=%h/.config/whatsapp-mcp/mcp-token
+#Environment=WHATSAPP_MCP_CLIENT_CONFIRM=1
 Restart=on-failure
 RestartSec=10s
 

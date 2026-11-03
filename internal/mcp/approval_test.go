@@ -29,14 +29,14 @@ var gatedToolNames = []string{
 // newStoreServer builds a Server over a real store but no WhatsApp client, so
 // a handler that reached the client would panic: a passing test proves the
 // code path never touched WhatsApp.
-func newStoreServer(t *testing.T) (*Server, *store.Store) {
+func newStoreServer(t *testing.T, opts ...Option) (*Server, *store.Store) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return NewServer(nil, nil, withStore(st)), st
+	return NewServer(nil, nil, append([]Option{withStore(st)}, opts...)...), st
 }
 
 func callTool(t *testing.T, s *Server, name string, args map[string]any) *mcp.CallToolResult {

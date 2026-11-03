@@ -83,6 +83,7 @@ type actionView struct {
 	Created    string
 	Expires    string
 	Decided    string
+	DecidedVia string
 	Result     string
 }
 
@@ -121,16 +122,17 @@ func (h *operatorHandlers) actionView(a store.PendingAction) (actionView, error)
 		return actionView{}, err
 	}
 	v := actionView{
-		ID:        a.ID,
-		Tool:      a.Tool,
-		Summary:   a.Summary,
-		TargetJID: a.TargetJID,
-		Args:      args,
-		Status:    a.Status,
-		Created:   formatTime(a.CreatedAt),
-		Expires:   formatTime(a.ExpiresAt),
-		Decided:   formatTime(a.DecidedAt),
-		Result:    result,
+		ID:         a.ID,
+		Tool:       a.Tool,
+		Summary:    a.Summary,
+		TargetJID:  a.TargetJID,
+		Args:       args,
+		Status:     a.Status,
+		Created:    formatTime(a.CreatedAt),
+		Expires:    formatTime(a.ExpiresAt),
+		Decided:    formatTime(a.DecidedAt),
+		DecidedVia: a.DecidedVia,
+		Result:     result,
 	}
 	if a.TargetJID != "" {
 		v.TargetName = h.approvals.TargetName(a.TargetJID)

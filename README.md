@@ -70,6 +70,21 @@ Scan the QR with WhatsApp (*Settings → Linked Devices → Link a Device*). The
 
 Restart the client. The daemon outlives client restarts.
 
+With a bearer token (required for confirmation in the client), keep the token in one `0600` file that both sides read: the daemon through `WHATSAPP_MCP_TOKEN_FILE`, Claude Code through a `headersHelper` that prints the header, so the token never sits in `mcp.json` or the environment:
+
+```bash
+install -m 700 -d ~/.config/whatsapp-mcp
+( umask 077; openssl rand -hex 32 > ~/.config/whatsapp-mcp/mcp-token )
+```
+
+```jsonc
+// Claude Code; the helper prints {"Authorization":"Bearer <token>"}
+{ "mcpServers": { "whatsapp": {
+  "type": "http", "url": "http://127.0.0.1:8765/mcp",
+  "headersHelper": "jq -Rc '{Authorization: (\"Bearer \" + .)}' ~/.config/whatsapp-mcp/mcp-token"
+} } }
+```
+
 ### Sending and receiving files
 
 `WHATSAPP_MCP_MEDIA_ROOT` (default `<store>/uploads/`, created on first run) is the only directory file tools may touch:
@@ -86,7 +101,9 @@ Paths outside the root, including symlinks that resolve outside it, are rejected
 ### Serve flags and environment
 
 - `-addr host:port` (env `WHATSAPP_MCP_ADDR`, default `127.0.0.1:8765`).
-- `-allow-remote`: bind a non-loopback address. Requires `WHATSAPP_MCP_TOKEN`, a bearer token for `/mcp` and `/pair/*`; `serve` exits without it.
+- `WHATSAPP_MCP_TOKEN` or `WHATSAPP_MCP_TOKEN_FILE` (a file readable only by its owner, mode `0600`; setting both is an error): a bearer token. When set, `/mcp` requires `Authorization: Bearer <token>` (compared in constant time), on loopback too. On loopback the pairing and operator pages stay without a token, because a browser cannot send one; they keep their CSRF, provenance and `Host` checks.
+- `-allow-remote`: bind a non-loopback address. Requires the token, which then also gates `/pair/*`, `/approvals/*` and `/access/*`; `serve` exits without it.
+- `WHATSAPP_MCP_CLIENT_CONFIRM=1`: let MCP clients with elicitation confirm gated calls themselves (see [Operator safeguards](#operator-safeguards)). Off by default; `serve` refuses to start with it but without a token.
 - `WHATSAPP_MCP_MEDIA_ROOT`: the file allowlist root above.
 - `WHATSAPP_MCP_DEBUG=1` or `-debug`: verbose logs (see [Debug logging](#debug-logging)).
 
@@ -225,16 +242,23 @@ Two safeguards sit between the model and your account. Both are enforced by the 
 
 **Read allowlist (default: nothing is readable).** The model can read only the chats you allow. `messages.db` has a `read_allowlist` table; while it is empty, `list_chats`, `list_messages`, `get_chat`, `get_message_context`, `search_contacts`, `download_media`, the `whatsapp://media/...` resource, `get_poll_results`, `list_groups`, `get_group_info`, `get_group_invite_link` and `get_blocklist` return nothing, and a request for a specific chat fails with `chat_jid: not on the read allowlist`. The per-chat actions `send_typing`, `mark_read`, `mark_chat_read` and `request_sync` are refused the same way. The store queries themselves are filtered, so no tool can bypass it. A person's `@lid` and `@s.whatsapp.net` forms count as one chat. A reply whose quoted message lives in a chat outside the allowlist is shown only as `restricted` (no quoted ID, sender or text). Account-level tools (`get_status`, `pairing_status`, `is_on_whatsapp`, `get_privacy_settings`, `send_presence`) are not affected. Manage the list at `http://127.0.0.1:8765/access`: one checkbox per chat (ticked = readable) and one Save button, which replaces the whole list in a single transaction (nothing ticked = deny all) and answers `Saved: N chats allowed`. The page lists every cached chat plus every group the account is in, fetched live and unfiltered by the allowlist, even if no message of it is cached; the two forms of one person (`@lid` and phone) are one row. While WhatsApp is not connected only cached chats are listed, and the page says that groups without a cached message are missing. Columns are name, number/JID, type and last message; allowed chats come first, then the most recently active, never-active groups last. Inline filters (text search, direct/group, only selected, select/clear all visible, selected counter) only hide rows: hidden ticked rows are still saved. A save naming a chat the page did not offer is refused with a 400. The live group list (`OperatorJoinedGroups`) is reachable only from this page, never from an MCP tool.
 
-**Approval for outbound and mutating actions.** These tools do not run when the model calls them: `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_reply`, `send_poll`, `send_poll_vote`, `send_contact_card`, `edit_message`, `delete_message`, `create_group`, `leave_group`, `reset_group_invite_link`, `update_group_participants`, `set_group_name`, `set_group_topic`, `set_group_announce`, `set_group_locked`, `join_group_with_link`, `block_contact`, `unblock_contact`, `set_privacy_setting` and `set_status_message`. The daemon validates the arguments, stores the call and answers `{status: "pending_approval", action_id, summary, approve_url}`. You approve or reject it at `http://127.0.0.1:8765/approvals`, which shows the full text, target chat and arguments. Only an approval runs the original handler, exactly once; rejected and expired actions never run. Approval does not bypass the send rate limiter. The model polls `get_action_status(action_id)` for the outcome; the result text is shown to it only when the action targets an allowlisted chat, otherwise just success or failure.
+**Approval for outbound and mutating actions.** These tools do not run when the model calls them: `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_reply`, `send_poll`, `send_poll_vote`, `send_contact_card`, `edit_message`, `delete_message`, `create_group`, `leave_group`, `reset_group_invite_link`, `update_group_participants`, `set_group_name`, `set_group_topic`, `set_group_announce`, `set_group_locked`, `join_group_with_link`, `block_contact`, `unblock_contact`, `set_privacy_setting` and `set_status_message`. The daemon validates the arguments, and then a person decides, in one of two ways:
+
+- **Operator queue at `/approvals`** (the default, and the stronger decision). The daemon stores the call and answers `{status: "pending_approval", action_id, summary, approve_url}`. You approve or reject it at `http://127.0.0.1:8765/approvals`, which shows the full text, target chat and arguments. The model polls `get_action_status(action_id)` for the outcome.
+- **Confirmation in the MCP client** (opt-in: `WHATSAPP_MCP_CLIENT_CONFIRM=1`, which requires a bearer token on `/mcp`; only for clients that speak MCP 2026-07-28 and declare form elicitation, such as current Claude Code). The call is answered with a confirmation form (a multi round-trip input request, SEP-2322, so the daemon stays stateless) that shows the tool, the target chat, the action and the exact arguments, including the full message text. Chat names, the action line and argument values are escaped or quoted, so a name or a message text cannot add lines to the form; the chat's name is shown only when the chat is on the read allowlist, otherwise only its JID, because the client may pass the form to the model. Ticking `confirm` and accepting runs the action at once and returns its state as `get_action_status` reports it; declining or cancelling returns an error starting `abgelehnt:` and nothing happens. The form's request state is signed (HMAC over the tool, the canonical arguments, a nonce and the issue time, with a key generated at daemon start): an answer is valid only for exactly the call that was asked about, for 15 minutes and once, and a restart voids unanswered forms. With the opt-in off, a call that carries a confirmation answer is refused and never runs. Clients on older protocol revisions always get the queue: the stateless daemon does not keep what they declared at `initialize`.
+
+Both paths run the original handler through the same executor, exactly once; rejected, declined and expired actions never run. Neither bypasses the send rate limiter. Every decision is recorded in `pending_actions` with `decided_via`, listed under "Recent decisions" at `/approvals` and reported by `get_action_status`. The result text is shown to the model only when the action targets an allowlisted chat, otherwise just success or failure; the summary stored for the model names a chat only when it is readable.
+
+**`decided_via` is a trust level.** `operator` means you decided on the `/approvals` page, outside the MCP channel. `client` means the answer came back over the same MCP channel as the call: the daemon checks the bearer token and that the answer belongs to exactly that call, but it cannot see whether a person or the client itself ticked the box. It relies on the token holder's client to show the form to a person. Enable the opt-in only for a client you trust to do that, and keep the token away from other processes.
 
 | Variable | Effect |
 |---|---|
-| `WHATSAPP_MCP_APPROVAL_TTL` | How long a queued action stays approvable, as a Go duration (default `24h`). An invalid value stops `serve` at startup. |
+| `WHATSAPP_MCP_APPROVAL_TTL` | How long a queued action stays approvable, as a Go duration (default `24h`). An invalid value stops `serve` at startup. Does not apply to confirmations in the client, which are valid for 15 minutes. |
 | `WHATSAPP_MCP_NOTIFY` | `1` runs `notify-send -a whatsapp-mcp "WhatsApp: approval needed" "<summary>"` for every queued action; failures are logged. |
 
-Both pages are server-rendered, accept state changes only as POST (`/approvals/approve`, `/approvals/reject`, `/access/save`) with a single-use CSRF token, and require both browser provenance headers (`Sec-Fetch-Site: same-origin` and an `Origin` naming the daemon's host), so a plain script request is refused. Without a bearer token every route, `/mcp` included, also refuses a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` on the bound port, which blocks DNS-rebinding pages. With `-allow-remote` they require the same bearer token as `/pair` and `/mcp`.
+Both pages are server-rendered, accept state changes only as POST (`/approvals/approve`, `/approvals/reject`, `/access/save`) with a single-use CSRF token, and require both browser provenance headers (`Sec-Fetch-Site: same-origin` and an `Origin` naming the daemon's host), so a plain script request is refused. On loopback every route, `/mcp` included, also refuses a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` on the bound port, which blocks DNS-rebinding pages. With `-allow-remote` they require the same bearer token as `/pair` and `/mcp`.
 
-**Limitation.** This guards against prompt injection arriving through MCP tool calls. It does not stop a process on the same machine from reaching the loopback UI: an agent with unrestricted local shell access can fetch the page, read the CSRF token, forge the provenance headers and approve its own actions. Do not run the daemon alongside agents that have unattended shell access, or restrict their access to the daemon's port.
+**Limitation.** This guards against prompt injection arriving through MCP tool calls. It does not stop a process on the same machine from reaching the loopback UI: an agent with unrestricted local shell access can fetch the page, read the CSRF token, forge the provenance headers and approve its own actions. A process that can read the bearer token file can also call `/mcp` as your client, and with `WHATSAPP_MCP_CLIENT_CONFIRM=1` send the accepted answer itself. Do not run the daemon alongside agents that have unattended shell access, or restrict their access to the daemon's port.
 
 ## Limitations
 

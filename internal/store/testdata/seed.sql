@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS pending_actions (
     created_at TIMESTAMP NOT NULL,
     expires_at TIMESTAMP NOT NULL,
     decided_at TIMESTAMP,
-    result_json TEXT
+    result_json TEXT,
+    decided_via TEXT
 );
 
 -- whatsmeow LID->PN map (normally lives in whatsapp.db, but co-located for tests)
