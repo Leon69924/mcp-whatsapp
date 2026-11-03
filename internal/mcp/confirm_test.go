@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,6 +80,13 @@ func callModern(t *testing.T, s *Server, name string, args map[string]any, caps 
 	return *envelope.Result
 }
 
+// newConfirmServer is a store server on which the operator enabled
+// confirmation in the client.
+func newConfirmServer(t *testing.T) (*Server, *store.Store) {
+	t.Helper()
+	return newStoreServer(t, WithApprovals(ApprovalConfig{TTL: DefaultApprovalTTL, ClientConfirm: true}))
+}
+
 func accept(confirm bool) map[string]any {
 	return map[string]any{"action": "accept", "content": map[string]any{confirmField: confirm}}
 }
@@ -99,9 +107,13 @@ func sendArgs() map[string]any {
 }
 
 func TestConfirm_AsksWithTheWholeAction(t *testing.T) {
-	s, st := newStoreServer(t)
+	s, st := newConfirmServer(t)
 	runs := fakeExecutor(s, "send_message", mcp.NewToolResultText(`{"Success":true}`), nil)
+	ctx := context.Background()
 	if err := st.StoreChat("447700000001@s.whatsapp.net", "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddReadAllowlist(ctx, "447700000001@s.whatsapp.net"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +122,7 @@ func TestConfirm_AsksWithTheWholeAction(t *testing.T) {
 	if !ok || form.Method != string(mcp.MethodElicitationCreate) {
 		t.Fatalf("input requests = %+v; want an elicitation keyed %q", res.InputRequests, confirmRequest)
 	}
-	for _, want := range []string{"send_message", "Alice (447700000001@s.whatsapp.net)", strings.Repeat("full text ", 20) + "END"} {
+	for _, want := range []string{"send_message", `"Alice" (447700000001@s.whatsapp.net)`, strings.Repeat("full text ", 20) + "END"} {
 		if !strings.Contains(form.Params.Message, want) {
 			t.Errorf("form message lacks %q:\n%s", want, form.Params.Message)
 		}
@@ -129,8 +141,54 @@ func TestConfirm_AsksWithTheWholeAction(t *testing.T) {
 	}
 }
 
+// The form may reach the model, so a chat off the read allowlist is shown by
+// JID only, as in the stored summary.
+func TestConfirm_NamesOnlyReadableChats(t *testing.T) {
+	s, st := newConfirmServer(t)
+	if err := st.StoreChat("447700000001@s.whatsapp.net", "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	message := askToSend(t, s, sendArgs()).InputRequests[confirmRequest].Params.Message
+	if strings.Contains(message, "Alice") || !strings.Contains(message, "Chat: 447700000001@s.whatsapp.net\n") {
+		t.Fatalf("form for a chat off the allowlist:\n%s", message)
+	}
+}
+
+// A chat name or a message text must not be able to add lines to the form or
+// reorder it.
+func TestConfirm_EscapesSpoofedLines(t *testing.T) {
+	s, st := newConfirmServer(t)
+	ctx := context.Background()
+	if err := st.StoreChat("447700000001@s.whatsapp.net", "Alice\nChat: Bob (447700000002@s.whatsapp.net)", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddReadAllowlist(ctx, "447700000001@s.whatsapp.net"); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"recipient": "447700000001", "message": "hi\nAction: nothing \u202ereversed\u2028next"}
+	message := askToSend(t, s, args).InputRequests[confirmRequest].Params.Message
+
+	for _, prefix := range []string{"Chat:", "Action:"} {
+		count := 0
+		for _, line := range strings.Split(message, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("%d lines start with %q; want exactly one:\n%s", count, prefix, message)
+		}
+	}
+	if strings.ContainsAny(message, "\u202e\u2028") {
+		t.Errorf("form keeps a raw bidi override or line separator:\n%q", message)
+	}
+	if !strings.Contains(message, `"Alice\nChat: Bob (447700000002@s.whatsapp.net)" (447700000001@s.whatsapp.net)`) {
+		t.Errorf("form does not quote the chat name:\n%s", message)
+	}
+}
+
 func TestConfirm_AcceptRunsOnceThroughTheExecutor(t *testing.T) {
-	s, st := newStoreServer(t)
+	s, st := newConfirmServer(t)
 	runs := fakeExecutor(s, "send_message", mcp.NewToolResultText(`{"Success":true}`), nil)
 	args := sendArgs()
 	state := askToSend(t, s, args).RequestState
@@ -165,7 +223,7 @@ func TestConfirm_DeclineNeverRuns(t *testing.T) {
 		"accept unticked": accept(false),
 	} {
 		t.Run(name, func(t *testing.T) {
-			s, st := newStoreServer(t)
+			s, st := newConfirmServer(t)
 			runs := fakeExecutor(s, "send_message", mcp.NewToolResultText("ok"), nil)
 			args := sendArgs()
 			state := askToSend(t, s, args).RequestState
@@ -183,7 +241,7 @@ func TestConfirm_DeclineNeverRuns(t *testing.T) {
 }
 
 func TestConfirm_RefusesAnAnswerForAnotherCall(t *testing.T) {
-	s, st := newStoreServer(t)
+	s, st := newConfirmServer(t)
 	runs := fakeExecutor(s, "send_message", mcp.NewToolResultText("ok"), nil)
 	args := sendArgs()
 	state := askToSend(t, s, args).RequestState
@@ -220,8 +278,36 @@ func TestConfirm_RefusesAnAnswerForAnotherCall(t *testing.T) {
 	}
 }
 
-func TestConfirm_ClientWithoutElicitationIsQueued(t *testing.T) {
+// Confirmation in the client is an operator opt-in: without it an eliciting
+// client is queued like any other, and a call that carries an answer is
+// refused outright, never run.
+func TestConfirm_DisabledByDefault(t *testing.T) {
 	s, st := newStoreServer(t)
+	runs := fakeExecutor(s, "send_message", mcp.NewToolResultText("ok"), nil)
+	queued := callModern(t, s, "send_message", sendArgs(), elicitingClient, "", nil)
+	if queued.ResultType == string(mcp.ResultTypeInputRequired) || !strings.Contains(queued.text(), "pending_approval") {
+		t.Fatalf("eliciting client with the opt-in off: want pending_approval, got %+v", queued)
+	}
+
+	// A self-made answer, even one signed by this server's key, must not run.
+	args := sendArgs()
+	call := gatedCall{tool: "send_message", argsJSON: canonicalSendArgs(t, args)}
+	issued := strconv.FormatInt(time.Now().Unix(), 10)
+	state := "NONCE." + issued + "." + s.signConfirmation(call, "NONCE", issued)
+	res := callModern(t, s, "send_message", args, elicitingClient, state, accept(true))
+	if !res.IsError || !strings.Contains(res.text(), "disabled") {
+		t.Fatalf("answer with the opt-in off: want a refusal, got %+v", res)
+	}
+	if runs.Load() != 0 {
+		t.Fatal("an answer with the opt-in off ran the action")
+	}
+	if _, err := st.GetAction(context.Background(), "NONCE"); !errors.Is(err, store.ErrActionNotFound) {
+		t.Fatalf("refused answer was recorded: %v", err)
+	}
+}
+
+func TestConfirm_ClientWithoutElicitationIsQueued(t *testing.T) {
+	s, st := newConfirmServer(t)
 	runs := fakeExecutor(s, "send_message", mcp.NewToolResultText("ok"), nil)
 	for name, caps := range map[string]map[string]any{
 		"no elicitation": {},

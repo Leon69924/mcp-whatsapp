@@ -1,7 +1,7 @@
 {{define "title"}}Approvals{{end}}
 {{define "content"}}
 <h1>Pending approvals</h1>
-<p class="muted">The model asked for these actions from an MCP client that cannot ask you itself. Nothing runs until you approve it; an unanswered request expires. A client that supports elicitation asks you to confirm in the client instead; those decisions appear below with "MCP client".</p>
+<p class="muted">The model asked for these actions from an MCP client that cannot ask you itself. Nothing runs until you approve it; an unanswered request expires. If you enabled confirmation in the client (WHATSAPP_MCP_CLIENT_CONFIRM=1), a client that supports elicitation asks you there instead; those decisions appear below as "MCP client", a weaker decision than one made here because the answer arrives over the same channel as the request.</p>
 {{if not .Pending}}<p>Nothing is waiting for approval.</p>{{end}}
 {{range .Pending}}
 <section class="card" id="{{.ID}}">
@@ -32,7 +32,7 @@
 {{range .Recent}}
 <tr>
 <td>{{.Decided}}</td>
-<td>{{if eq .DecidedVia "client"}}MCP client{{else if eq .DecidedVia "operator"}}/approvals{{end}}</td>
+<td>{{if eq .DecidedVia "client"}}MCP client (in-band){{else if eq .DecidedVia "operator"}}/approvals{{end}}</td>
 <td>{{.Summary}}</td>
 <td>{{.Status}}</td>
 <td>{{if .Result}}<pre>{{.Result}}</pre>{{end}}</td>

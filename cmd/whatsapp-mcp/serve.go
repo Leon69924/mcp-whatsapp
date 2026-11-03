@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,16 +41,25 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		return 2
 	}
 
-	// When binding to a non-loopback address we require a shared bearer
-	// token. Loopback-only operation intentionally keeps no token so local
-	// editors and curl can hit the daemon without extra setup.
-	var authToken string
-	if allowRemote {
-		authToken = os.Getenv("WHATSAPP_MCP_TOKEN")
-		if authToken == "" {
-			fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
-			return 2
-		}
+	// A configured bearer token gates /mcp, on loopback too; a non-loopback
+	// bind and confirmation in the client both require one.
+	authToken, err := resolveAuthToken(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
+	if allowRemote && authToken == "" {
+		fmt.Fprintln(os.Stderr, "-allow-remote requires a bearer token: set WHATSAPP_MCP_TOKEN or WHATSAPP_MCP_TOKEN_FILE")
+		return 2
+	}
+	approvals, err := resolveApprovalConfig("http://"+addr, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
+	if approvals.ClientConfirm && authToken == "" {
+		fmt.Fprintln(os.Stderr, "WHATSAPP_MCP_CLIENT_CONFIRM=1 requires a bearer token on /mcp (WHATSAPP_MCP_TOKEN or WHATSAPP_MCP_TOKEN_FILE): without one any local process could confirm its own actions")
+		return 2
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -106,17 +117,13 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		Addr:      addr,
 		Driver:    drv,
 		AuthToken: authToken,
+		Remote:    allowRemote,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon.New: %v\n", err)
 		return 1
 	}
 
-	approvals, err := resolveApprovalConfig("http://"+addr, os.Getenv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 2
-	}
 	mcpServer := mcpsrv.NewServer(c, d.Cache(), mcpsrv.WithApprovals(approvals))
 	d.SetMCPMount(mcpServer.AttachHTTP)
 	d.SetOperator(mcpServer, st)
@@ -132,15 +139,56 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	return 0
 }
 
-// resolveApprovalConfig reads the approval-queue settings from the environment:
-// WHATSAPP_MCP_APPROVAL_TTL (a Go duration, default 24h) and WHATSAPP_MCP_NOTIFY
-// (`1` raises a desktop notification per queued action). baseURL is the
-// daemon's own origin, used for the approve_url handed to the model.
+// resolveAuthToken reads the bearer token for /mcp: WHATSAPP_MCP_TOKEN, or
+// WHATSAPP_MCP_TOKEN_FILE naming a file that only its owner can read (the
+// file the client's headersHelper reads, so the token sits in one place).
+// Setting both is an error; setting neither means no token.
+func resolveAuthToken(getenv func(string) string) (string, error) {
+	inline, file := getenv("WHATSAPP_MCP_TOKEN"), getenv("WHATSAPP_MCP_TOKEN_FILE")
+	switch {
+	case inline != "" && file != "":
+		return "", errors.New("set WHATSAPP_MCP_TOKEN or WHATSAPP_MCP_TOKEN_FILE, not both")
+	case file == "":
+		return inline, nil
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return "", fmt.Errorf("WHATSAPP_MCP_TOKEN_FILE: %w", err)
+	}
+	// Windows has no POSIX mode bits; os.Stat reports 0666 for every file.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("WHATSAPP_MCP_TOKEN_FILE: %s must not be readable by group or others (mode %04o; use chmod 600)", file, info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("WHATSAPP_MCP_TOKEN_FILE: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("WHATSAPP_MCP_TOKEN_FILE: %s is empty", file)
+	}
+	return token, nil
+}
+
+// resolveApprovalConfig reads the approval settings from the environment:
+// WHATSAPP_MCP_APPROVAL_TTL (a Go duration, default 24h), WHATSAPP_MCP_NOTIFY
+// (`1` raises a desktop notification per queued action) and
+// WHATSAPP_MCP_CLIENT_CONFIRM (`1` lets an MCP client with elicitation
+// confirm gated calls itself; unset or `0` keeps every call in the queue).
+// baseURL is the daemon's own origin, used for the approve_url handed to the
+// model.
 func resolveApprovalConfig(baseURL string, getenv func(string) string) (mcpsrv.ApprovalConfig, error) {
 	cfg := mcpsrv.ApprovalConfig{
 		TTL:     mcpsrv.DefaultApprovalTTL,
 		Notify:  getenv("WHATSAPP_MCP_NOTIFY") == "1",
 		BaseURL: baseURL,
+	}
+	switch raw := getenv("WHATSAPP_MCP_CLIENT_CONFIRM"); raw {
+	case "", "0":
+	case "1":
+		cfg.ClientConfirm = true
+	default:
+		return mcpsrv.ApprovalConfig{}, fmt.Errorf("WHATSAPP_MCP_CLIENT_CONFIRM: must be 1 or 0, got %q", raw)
 	}
 	if raw := getenv("WHATSAPP_MCP_APPROVAL_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)

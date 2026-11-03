@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -143,6 +144,7 @@ func TestServer_AuthTokenGatesMCPAndPair(t *testing.T) {
 		Addr:      "127.0.0.1:0",
 		Driver:    drv,
 		AuthToken: "secret123",
+		Remote:    true,
 	})
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
@@ -201,6 +203,58 @@ func TestServer_AuthTokenGatesMCPAndPair(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401 with wrong bearer, got %d", resp.StatusCode)
+	}
+}
+
+// On loopback a configured token gates /mcp only; the operator pages and
+// /pair stay reachable from the browser, behind the loopback Host check.
+func TestServer_LoopbackTokenGatesOnlyMCP(t *testing.T) {
+	if _, err := New(Config{Addr: "127.0.0.1:0", Driver: newFakePairDriver(true), Remote: true}); err == nil {
+		t.Fatal("remote bind without a token: want an error")
+	}
+	s, err := New(Config{Addr: "127.0.0.1:0", Driver: newFakePairDriver(true), AuthToken: "secret123"})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+	<-s.listenerOK
+	base := "http://" + s.BoundAddr()
+	waitFor(t, func() bool { return s.Cache().Paired() }, "initial paired flag set")
+
+	status := func(path, auth, host string) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if host != "" {
+			req.Host = host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := status("/mcp", "", ""); got != http.StatusUnauthorized {
+		t.Fatalf("/mcp without token: %d; want 401", got)
+	}
+	if got := status("/mcp", "Bearer wrong", ""); got != http.StatusUnauthorized {
+		t.Fatalf("/mcp with a wrong token: %d; want 401", got)
+	}
+	if got := status("/mcp", "Bearer secret123", ""); got == http.StatusUnauthorized {
+		t.Fatal("/mcp with the token: got 401")
+	}
+	if got := status("/pair", "", ""); got != http.StatusOK {
+		t.Fatalf("/pair on loopback without token: %d; want 200", got)
+	}
+	_, port, _ := net.SplitHostPort(s.BoundAddr())
+	if got := status("/pair", "", "attacker.example:"+port); got != http.StatusMisdirectedRequest {
+		t.Fatalf("rebinding host: %d; want 421, the Host check must stay on with a token", got)
 	}
 }
 

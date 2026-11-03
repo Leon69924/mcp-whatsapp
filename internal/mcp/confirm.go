@@ -20,8 +20,13 @@ import (
 	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
 
-// A client that can show the user a form (MCP elicitation) confirms a gated
-// call in the client instead of the /approvals queue. The call is answered
+// When the operator opted in (ApprovalConfig.ClientConfirm, which serve allows
+// only with a bearer token on /mcp), a client that can show the user a form
+// (MCP elicitation) confirms a gated call in the client instead of the
+// /approvals queue. This is a weaker decision than one at /approvals: the
+// answer arrives over the same MCP channel as the call, so the daemon trusts
+// the token holder's client to have asked a person. It is recorded with
+// decided_via "client" so the two stay distinguishable. The call is answered
 // with an input request (SEP-2322 multi round-trip, so the server stays
 // stateless): a form that shows the action and asks for confirm=true. The
 // client asks the user and retries the call with the answer and the request
@@ -63,8 +68,8 @@ func canElicit(ctx context.Context) bool {
 }
 
 // askConfirmation answers call with a confirmation form for the user.
-func (s *Server) askConfirmation(call gatedCall) (*mcp.CallToolResult, error) {
-	message, err := s.confirmMessage(call)
+func (s *Server) askConfirmation(ctx context.Context, call gatedCall) (*mcp.CallToolResult, error) {
+	message, err := s.confirmMessage(ctx, call)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -89,23 +94,53 @@ func (s *Server) askConfirmation(call gatedCall) (*mcp.CallToolResult, error) {
 		ToolResult(), nil
 }
 
-// confirmMessage words the confirmation form for the user. Unlike the summary
-// stored for the model it always names the target chat, as /approvals does:
-// it is shown to the person deciding.
-func (s *Server) confirmMessage(call gatedCall) (string, error) {
+// confirmMessage words the confirmation form for the user. The client may
+// hand the message to the model as well, so like the stored summary it names
+// a chat only when the chat is on the read allowlist. Every value that a
+// sender, a chat or the model controls is escaped (printable) or quoted, so
+// a chat name or a message text cannot add lines such as "Chat: …" to the
+// form or reorder it with bidirectional controls.
+func (s *Server) confirmMessage(ctx context.Context, call gatedCall) (string, error) {
 	target := "none (account-level action)"
 	if call.target != "" {
-		target = call.target
-		if name := s.store.DisplayName(call.target); name != "" {
-			target = name + " (" + call.target + ")"
+		name, err := s.readableName(ctx, call.target)
+		if err != nil {
+			return "", err
+		}
+		target = printable(call.target)
+		if name != "" {
+			target = strconv.Quote(name) + " (" + target + ")"
 		}
 	}
-	var args bytes.Buffer
-	if err := json.Indent(&args, call.argsJSON, "", "  "); err != nil {
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, call.argsJSON, "", "  "); err != nil {
 		return "", fmt.Errorf("format arguments: %w", err)
 	}
+	// json.Marshal already escapes control characters inside strings; this
+	// also escapes the printable-looking ones it leaves, line by line so the
+	// indentation survives.
+	lines := strings.Split(indented.String(), "\n")
+	for i, line := range lines {
+		lines[i] = printable(line)
+	}
 	return fmt.Sprintf("WhatsApp: confirm %s\n\nChat: %s\nAction: %s\n\nExactly these arguments will be used:\n%s",
-		call.tool, target, call.detail, args.String()), nil
+		call.tool, target, printable(call.detail), strings.Join(lines, "\n")), nil
+}
+
+// printable escapes every rune that is not printable (control characters,
+// line and paragraph separators, bidirectional overrides) as Go would in a
+// quoted string, leaving the rest as it is.
+func printable(text string) string {
+	var b strings.Builder
+	for _, r := range text {
+		if strconv.IsPrint(r) {
+			b.WriteRune(r)
+			continue
+		}
+		quoted := strconv.QuoteRune(r)
+		b.WriteString(quoted[1 : len(quoted)-1])
+	}
+	return b.String()
 }
 
 // signConfirmation is the HMAC that binds a confirmation to call, nonce and

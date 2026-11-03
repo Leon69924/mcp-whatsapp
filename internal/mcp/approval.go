@@ -18,12 +18,13 @@ import (
 
 // Tools that send, edit, delete or reconfigure are not executed when the model
 // calls them. The call is validated as the handler would and then decided by a
-// person: in the MCP client's confirmation form when the client supports
-// elicitation (confirm.go), otherwise at /approvals — the call is persisted in
-// pending_actions and answered with `pending_approval`, and the operator
-// approves or rejects it there. Either decision runs the original handler
-// through the same executor — once, with a fresh context, still subject to the
-// rate limiter — and is recorded in pending_actions with who decided it.
+// person at /approvals: it is persisted in pending_actions and answered with
+// `pending_approval`, and the operator approves or rejects it there. When the
+// operator opted in (ApprovalConfig.ClientConfirm) and the MCP client supports
+// elicitation, the user confirms it in the client's form instead (confirm.go).
+// Either decision runs the original handler through the same executor — once,
+// with a fresh context, still subject to the rate limiter — and is recorded in
+// pending_actions with who decided it.
 
 // DefaultApprovalTTL is how long a queued action stays approvable.
 const DefaultApprovalTTL = 24 * time.Hour
@@ -47,6 +48,13 @@ type ApprovalConfig struct {
 	// BaseURL is the daemon's origin (e.g. http://127.0.0.1:8765), used to
 	// build the approve_url handed to the model.
 	BaseURL string
+	// ClientConfirm lets an MCP client with elicitation confirm a gated call
+	// in its own form instead of the queue. The answer reaches the daemon
+	// over the same MCP channel as the call, so it is only as trustworthy as
+	// that channel: serve enables it only together with a bearer token on
+	// /mcp. Off, every gated call is queued and a call carrying an answer is
+	// refused.
+	ClientConfirm bool
 }
 
 // Option customises a Server at construction.
@@ -63,7 +71,7 @@ func withStore(st *store.Store) Option {
 }
 
 // queuedNote is appended to the description of every approval-gated tool.
-const queuedNote = " Requires the user's approval. When the MCP client supports elicitation, the user is asked to confirm this exact call in the client: an accepted call runs at once and returns the action's state as get_action_status reports it (`status` `executed` or `failed`, `result` holding the output described above); a declined one returns an error and does nothing — do not repeat it unless the user asks. A client without elicitation gets the operator queue instead: the call returns `{status: \"pending_approval\", action_id, summary, approve_url}` without doing anything, the operator approves or rejects it at /approvals, and the result is then available from get_action_status."
+const queuedNote = " Requires the user's approval. If the operator enabled confirmation in the client and the MCP client supports elicitation, the user is asked to confirm this exact call in the client: an accepted call runs at once and returns the action's state as get_action_status reports it (`status` `executed` or `failed`, `result` holding the output described above); a declined one returns an error and does nothing — do not repeat it unless the user asks. Otherwise the call goes to the operator queue: it returns `{status: \"pending_approval\", action_id, summary, approve_url}` without doing anything, the operator approves or rejects it at /approvals, and the result is then available from get_action_status."
 
 // queuedDesc adds the approval note to a gated tool's description.
 func queuedDesc(description string) string { return description + queuedNote }
@@ -104,11 +112,14 @@ func registerGated[A any](s *Server, tool mcp.Tool, g gatedTool[A]) {
 			return mcp.NewToolResultError(fmt.Sprintf("marshal arguments: %v", err)), nil
 		}
 		call := gatedCall{tool: tool.Name, argsJSON: argsJSON, target: target, detail: detail}
+		answered := req.Params.RequestState != "" || len(req.Params.InputResponses) > 0
 		switch {
-		case req.Params.RequestState != "":
+		case answered && !s.approvals.ClientConfirm:
+			return mcp.NewToolResultError("nothing was done: confirmation in the client is disabled on this daemon, so a call carrying a confirmation answer is refused; call the tool again without one to queue it for /approvals"), nil
+		case answered:
 			return s.decideConfirmation(ctx, call, req.Params.MultiRoundTripParams)
-		case canElicit(ctx):
-			return s.askConfirmation(call)
+		case s.approvals.ClientConfirm && canElicit(ctx):
+			return s.askConfirmation(ctx, call)
 		default:
 			return s.queueAction(ctx, call)
 		}
@@ -178,16 +189,28 @@ func (s *Server) summarize(ctx context.Context, tool, target, detail string) (st
 		return tool + ": " + detail, nil
 	}
 	label := target
-	allowed, err := s.store.IsChatAllowed(ctx, target)
+	name, err := s.readableName(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	if name != "" {
+		label = name + " (" + target + ")"
+	}
+	return fmt.Sprintf("%s -> %s: %s", tool, label, detail), nil
+}
+
+// readableName is the display name of chat jid when it is on the read
+// allowlist, and "" otherwise (or when the chat has no name): naming a chat
+// the model may not read would tell it whose a guessed JID is.
+func (s *Server) readableName(ctx context.Context, jid string) (string, error) {
+	allowed, err := s.store.IsChatAllowed(ctx, jid)
 	if err != nil {
 		return "", fmt.Errorf("read allowlist lookup failed: %w", err)
 	}
-	if allowed {
-		if name := s.store.DisplayName(target); name != "" {
-			label = name + " (" + target + ")"
-		}
+	if !allowed {
+		return "", nil
 	}
-	return fmt.Sprintf("%s -> %s: %s", tool, label, detail), nil
+	return s.store.DisplayName(jid), nil
 }
 
 // previewText quotes a message body for a summary, collapsing whitespace and

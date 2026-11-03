@@ -241,8 +241,17 @@ func TestRequiresAuth_CoversOperatorPages(t *testing.T) {
 		"/access": true, "/access/allow": true,
 		"/accessory": false, "/other": false,
 	} {
-		if got := requiresAuth(path); got != want {
-			t.Errorf("requiresAuth(%q) = %v; want %v", path, got, want)
+		if got := requiresAuth(path, true); got != want {
+			t.Errorf("remote: requiresAuth(%q) = %v; want %v", path, got, want)
+		}
+	}
+	// On loopback only /mcp needs the token; the browser cannot send one to
+	// the operator pages.
+	for path, want := range map[string]bool{
+		"/mcp": true, "/mcp/x": true, "/pair": false, "/approvals": false, "/access/allow": false,
+	} {
+		if got := requiresAuth(path, false); got != want {
+			t.Errorf("loopback: requiresAuth(%q) = %v; want %v", path, got, want)
 		}
 	}
 }
@@ -251,7 +260,7 @@ func TestAuthMiddleware_ProtectsOperatorPages(t *testing.T) {
 	h, _, _ := newOperatorTest()
 	mux := http.NewServeMux()
 	h.mount(mux)
-	handler := authMiddleware(mux, "secret")
+	handler := authMiddleware(mux, "secret", true)
 
 	for _, path := range []string{"/approvals", "/access"} {
 		w := httptest.NewRecorder()
