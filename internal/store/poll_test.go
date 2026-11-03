@@ -335,6 +335,11 @@ func TestMigrateSchema_AddsPollOptionsColumn(t *testing.T) {
 	if _, err := db.Exec(legacy); err != nil {
 		t.Fatalf("apply legacy schema: %v", err)
 	}
+	// Open applies the current schema before migrating: it creates the tables
+	// the legacy database lacks and leaves the existing ones as they are.
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
 
 	// Sanity: poll_options_json must be missing before migration.
 	if columnExists(t, db, "messages", "poll_options_json") {

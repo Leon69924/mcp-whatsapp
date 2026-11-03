@@ -227,3 +227,68 @@ func (h *harness) initializeMCP() {
 		h.t.Fatalf("stateless server minted Mcp-Session-Id %q", sid)
 	}
 }
+
+// modernResult is a 2026-07-28 tools/call result, including the input request
+// a gated tool answers with when the client can confirm.
+type modernResult struct {
+	ResultType    string `json:"resultType"`
+	RequestState  string `json:"requestState"`
+	IsError       bool   `json:"isError"`
+	InputRequests map[string]struct {
+		Method string `json:"method"`
+		Params struct {
+			Message string `json:"message"`
+		} `json:"params"`
+	} `json:"inputRequests"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func (r modernResult) text() string {
+	if len(r.Content) == 0 {
+		return ""
+	}
+	return r.Content[0].Text
+}
+
+// callToolModern POSTs a 2026-07-28 tools/call (no initialize; version and
+// client capabilities in _meta). When roundTrip is non-nil it is merged into
+// params, carrying requestState and inputResponses of a retry.
+func (h *harness) callToolModern(name string, args, caps, roundTrip map[string]any) modernResult {
+	h.t.Helper()
+	params := map[string]any{
+		"name":      name,
+		"arguments": args,
+		"_meta": map[string]any{
+			"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+			"io.modelcontextprotocol/clientCapabilities": caps,
+		},
+	}
+	for k, v := range roundTrip {
+		params[k] = v
+	}
+	buf, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
+	req, _ := http.NewRequest(http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "tools/call")
+	req.Header.Set("Mcp-Name", name)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatalf("POST tools/call: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		h.t.Fatalf("tools/call %s: status %d: %s", name, resp.StatusCode, raw)
+	}
+	var envelope struct {
+		Result *modernResult `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Result == nil {
+		h.t.Fatalf("tools/call %s: undecodable result %s (%v)", name, raw, err)
+	}
+	return *envelope.Result
+}

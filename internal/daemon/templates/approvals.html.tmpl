@@ -1,7 +1,7 @@
 {{define "title"}}Approvals{{end}}
 {{define "content"}}
 <h1>Pending approvals</h1>
-<p class="muted">The model asked for these actions. Nothing runs until you approve it; an unanswered request expires.</p>
+<p class="muted">The model asked for these actions from an MCP client that cannot ask you itself. Nothing runs until you approve it; an unanswered request expires. A client that supports elicitation asks you to confirm in the client instead; those decisions appear below with "MCP client".</p>
 {{if not .Pending}}<p>Nothing is waiting for approval.</p>{{end}}
 {{range .Pending}}
 <section class="card" id="{{.ID}}">
@@ -28,10 +28,11 @@
 <h2>Recent decisions</h2>
 {{if not .Recent}}<p>No decided actions yet.</p>{{else}}
 <table>
-<tr><th>Decided</th><th>Action</th><th>Status</th><th>Result</th></tr>
+<tr><th>Decided</th><th>By</th><th>Action</th><th>Status</th><th>Result</th></tr>
 {{range .Recent}}
 <tr>
 <td>{{.Decided}}</td>
+<td>{{if eq .DecidedVia "client"}}MCP client{{else if eq .DecidedVia "operator"}}/approvals{{end}}</td>
 <td>{{.Summary}}</td>
 <td>{{.Status}}</td>
 <td>{{if .Result}}<pre>{{.Result}}</pre>{{end}}</td>

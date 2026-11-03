@@ -23,15 +23,18 @@ type getActionStatusArgs struct {
 
 // actionStatus is the get_action_status payload.
 type actionStatus struct {
-	ActionID  string          `json:"action_id"`
-	Tool      string          `json:"tool"`
-	Status    string          `json:"status"`
-	Summary   string          `json:"summary"`
-	TargetJID string          `json:"target_jid,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	ExpiresAt time.Time       `json:"expires_at"`
-	DecidedAt *time.Time      `json:"decided_at,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
+	ActionID  string     `json:"action_id"`
+	Tool      string     `json:"tool"`
+	Status    string     `json:"status"`
+	Summary   string     `json:"summary"`
+	TargetJID string     `json:"target_jid,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
+	// DecidedVia is who decided the action: "operator" (/approvals) or
+	// "client" (the confirmation form in the MCP client).
+	DecidedVia string          `json:"decided_via,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
 	// ResultWithheld explains why Result carries no text.
 	ResultWithheld string `json:"result_withheld,omitempty"`
 }
@@ -44,7 +47,7 @@ type redactedResult struct {
 
 func (s *Server) registerGetActionStatus() {
 	tool := mcp.NewTool("get_action_status",
-		mcp.WithDescription(offlineSafePrefix+"Report the state of an action that a gated tool queued for operator approval. Read-only; no side effects. Poll it after a tool returned `pending_approval`; the operator decides at /approvals. Returns a JSON object `{action_id, tool, status, summary, target_jid?, created_at, expires_at, decided_at?, result?}` where `status` is `pending`, `rejected`, `expired`, `executing`, `executed`, or `failed`, and `result` (`{is_error, text}`) appears once the action has run."),
+		mcp.WithDescription(offlineSafePrefix+"Report the state of an action of a gated tool: one queued for operator approval, or one the user confirmed or declined in the MCP client. Read-only; no side effects. Poll it after a tool returned `pending_approval`; the operator decides at /approvals. Returns a JSON object `{action_id, tool, status, summary, target_jid?, created_at, expires_at, decided_at?, decided_via?, result?}` where `status` is `pending`, `rejected`, `expired`, `executing`, `executed`, or `failed`, `decided_via` is `operator` (/approvals) or `client` (confirmed or declined in the MCP client), and `result` (`{is_error, text}`) appears once the action has run."),
 		mcp.WithString("action_id", mcp.Required(), mcp.Description("`action_id` returned by the gated tool call")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -65,25 +68,35 @@ func (s *Server) registerGetActionStatus() {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		out := actionStatus{
-			ActionID:  action.ID,
-			Tool:      action.Tool,
-			Status:    action.Status,
-			Summary:   action.Summary,
-			TargetJID: action.TargetJID,
-			CreatedAt: action.CreatedAt,
-			ExpiresAt: action.ExpiresAt,
-		}
-		if !action.DecidedAt.IsZero() {
-			out.DecidedAt = &action.DecidedAt
-		}
-		if action.ResultJSON != "" {
-			if err := s.fillResult(ctx, &out, action); err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
+		out, err := s.actionStatusOf(ctx, action)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return resultJSON(out)
 	}))
+}
+
+// actionStatusOf reports an action as get_action_status shows it to the model.
+func (s *Server) actionStatusOf(ctx context.Context, action store.PendingAction) (actionStatus, error) {
+	out := actionStatus{
+		ActionID:   action.ID,
+		Tool:       action.Tool,
+		Status:     action.Status,
+		Summary:    action.Summary,
+		TargetJID:  action.TargetJID,
+		CreatedAt:  action.CreatedAt,
+		ExpiresAt:  action.ExpiresAt,
+		DecidedVia: action.DecidedVia,
+	}
+	if !action.DecidedAt.IsZero() {
+		out.DecidedAt = &action.DecidedAt
+	}
+	if action.ResultJSON != "" {
+		if err := s.fillResult(ctx, &out, action); err != nil {
+			return actionStatus{}, err
+		}
+	}
+	return out, nil
 }
 
 // fillResult attaches the execution result to the status. The result text can

@@ -17,10 +17,13 @@ import (
 )
 
 // Tools that send, edit, delete or reconfigure are not executed when the model
-// calls them. The call is validated as the handler would, persisted in
-// pending_actions and answered with `pending_approval`; the operator then
-// approves or rejects it at /approvals, and only an approval runs the original
-// handler — once, with a fresh context, still subject to the rate limiter.
+// calls them. The call is validated as the handler would and then decided by a
+// person: in the MCP client's confirmation form when the client supports
+// elicitation (confirm.go), otherwise at /approvals — the call is persisted in
+// pending_actions and answered with `pending_approval`, and the operator
+// approves or rejects it there. Either decision runs the original handler
+// through the same executor — once, with a fresh context, still subject to the
+// rate limiter — and is recorded in pending_actions with who decided it.
 
 // DefaultApprovalTTL is how long a queued action stays approvable.
 const DefaultApprovalTTL = 24 * time.Hour
@@ -60,7 +63,7 @@ func withStore(st *store.Store) Option {
 }
 
 // queuedNote is appended to the description of every approval-gated tool.
-const queuedNote = " Requires operator approval: the call is queued and returns `{status: \"pending_approval\", action_id, summary, approve_url}` without doing anything; the operator approves or rejects it at /approvals, and the result described above is then available from get_action_status."
+const queuedNote = " Requires the user's approval. When the MCP client supports elicitation, the user is asked to confirm this exact call in the client: an accepted call runs at once and returns the action's state as get_action_status reports it (`status` `executed` or `failed`, `result` holding the output described above); a declined one returns an error and does nothing — do not repeat it unless the user asks. A client without elicitation gets the operator queue instead: the call returns `{status: \"pending_approval\", action_id, summary, approve_url}` without doing anything, the operator approves or rejects it at /approvals, and the result is then available from get_action_status."
 
 // queuedDesc adds the approval note to a gated tool's description.
 func queuedDesc(description string) string { return description + queuedNote }
@@ -89,17 +92,37 @@ func registerGated[A any](s *Server, tool mcp.Tool, g gatedTool[A]) {
 		}
 		return g.execute(ctx, a)
 	}
-	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a A) (*mcp.CallToolResult, error) {
+	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, req mcp.CallToolRequest, a A) (*mcp.CallToolResult, error) {
 		target, detail, reject := g.prepare(ctx, a)
 		if reject != nil {
 			return reject, nil
 		}
+		// The typed struct re-marshals to canonical JSON (fixed field order,
+		// unknown fields dropped): what is stored, executed and confirmed.
 		argsJSON, err := json.Marshal(a)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("marshal arguments: %v", err)), nil
 		}
-		return s.queueAction(ctx, tool.Name, argsJSON, target, detail)
+		call := gatedCall{tool: tool.Name, argsJSON: argsJSON, target: target, detail: detail}
+		switch {
+		case req.Params.RequestState != "":
+			return s.decideConfirmation(ctx, call, req.Params.MultiRoundTripParams)
+		case canElicit(ctx):
+			return s.askConfirmation(call)
+		default:
+			return s.queueAction(ctx, call)
+		}
 	}))
+}
+
+// gatedCall is one validated call of a gated tool.
+type gatedCall struct {
+	tool     string
+	argsJSON []byte
+	// target is the chat JID the action touches, "" for account-level actions.
+	target string
+	// detail is the one-line description of what the action does.
+	detail string
 }
 
 // pendingApproval is what the model gets back for a queued action.
@@ -111,31 +134,39 @@ type pendingApproval struct {
 }
 
 // queueAction persists the action and answers with pending_approval.
-func (s *Server) queueAction(ctx context.Context, tool string, argsJSON []byte, target, detail string) (*mcp.CallToolResult, error) {
-	summary, err := s.summarize(ctx, tool, target, detail)
+func (s *Server) queueAction(ctx context.Context, call gatedCall) (*mcp.CallToolResult, error) {
+	action, err := s.newAction(ctx, rand.Text(), call)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
-	}
-	now := time.Now().UTC()
-	action := store.PendingAction{
-		ID:        rand.Text(),
-		Tool:      tool,
-		ArgsJSON:  string(argsJSON),
-		Summary:   summary,
-		TargetJID: target,
-		CreatedAt: now,
-		ExpiresAt: now.Add(s.approvals.TTL),
 	}
 	if err := s.store.CreateAction(ctx, action); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	s.notifyQueued(summary)
+	s.notifyQueued(action.Summary)
 	return resultJSON(pendingApproval{
 		Status:     "pending_approval",
 		ActionID:   action.ID,
-		Summary:    summary,
+		Summary:    action.Summary,
 		ApproveURL: s.approvals.BaseURL + approvalPath + "#" + action.ID,
 	})
+}
+
+// newAction builds the pending_actions row for call under id, created now.
+func (s *Server) newAction(ctx context.Context, id string, call gatedCall) (store.PendingAction, error) {
+	summary, err := s.summarize(ctx, call.tool, call.target, call.detail)
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	now := time.Now().UTC()
+	return store.PendingAction{
+		ID:        id,
+		Tool:      call.tool,
+		ArgsJSON:  string(call.argsJSON),
+		Summary:   summary,
+		TargetJID: call.target,
+		CreatedAt: now,
+		ExpiresAt: now.Add(s.approvals.TTL),
+	}, nil
 }
 
 // summarize builds the one-line description of a queued action. The summary is
@@ -228,6 +259,13 @@ func (s *Server) ApproveAction(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	return s.runAction(action)
+}
+
+// runAction runs an executing action's original handler once and records the
+// outcome. It is the one executor for both an operator approval and a
+// confirmation in the client.
+func (s *Server) runAction(action store.PendingAction) error {
 	var (
 		res    *mcp.CallToolResult
 		runErr error

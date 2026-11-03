@@ -3,6 +3,7 @@
 package mcp
 
 import (
+	"crypto/rand"
 	"net/http"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -30,8 +31,11 @@ type Server struct {
 	store     *store.Store
 	approvals ApprovalConfig
 	// executors maps each approval-gated tool to the handler that runs it once
-	// the operator approves a queued call.
+	// the operator approves a queued call or the user confirms it in the client.
 	executors map[string]executor
+	// confirmKey signs the confirmation forms of this process (confirm.go); a
+	// restart voids every unanswered one.
+	confirmKey []byte
 }
 
 // NewServer constructs an MCP server with all tools registered against the
@@ -48,11 +52,12 @@ func NewServer(c *client.Client, cache pairingCache, opts ...Option) *Server {
 		server.WithToolCapabilities(true),
 	)
 	s := &Server{
-		client:    c,
-		mcp:       mcpSrv,
-		cache:     cache,
-		approvals: ApprovalConfig{TTL: DefaultApprovalTTL},
-		executors: map[string]executor{},
+		client:     c,
+		mcp:        mcpSrv,
+		cache:      cache,
+		approvals:  ApprovalConfig{TTL: DefaultApprovalTTL},
+		executors:  map[string]executor{},
+		confirmKey: []byte(rand.Text()),
 	}
 	if c != nil {
 		s.store = c.Store()
@@ -72,7 +77,9 @@ func (s *Server) MCP() *server.MCPServer { return s.mcp }
 // actual listener lifecycle is owned by the caller (internal/daemon).
 func (s *Server) AttachHTTP(mux *http.ServeMux) {
 	// Stateless: nothing here is session-scoped (the pairing cache is process-wide
-	// device state), so legacy clients get no Mcp-Session-Id either.
+	// device state), so legacy clients get no Mcp-Session-Id either. Confirming
+	// a gated call in the client needs no session: it is a multi round-trip
+	// request whose signed state travels with the client (confirm.go).
 	httpHandler := server.NewStreamableHTTPServer(s.mcp, server.WithStateLess(true))
 	mux.Handle("/mcp", httpHandler)
 }
