@@ -119,7 +119,7 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	}
 	mcpServer := mcpsrv.NewServer(c, d.Cache(), mcpsrv.WithApprovals(approvals))
 	d.SetMCPMount(mcpServer.AttachHTTP)
-	d.SetOperator(mcpServer, st)
+	d.SetOperator(mcpServer, st, c)
 
 	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair, approvals at /approvals, read access at /access)\n", addr)
 	if !c.IsLoggedIn() {
