@@ -7,17 +7,39 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 )
 
-// csrfGuard holds the single-use token a page embeds in its forms. Rendering a
-// page mints a fresh token (replacing the previous one); a POST must present it
-// and consumes it.
+const (
+	// csrfTokenTTL bounds how long a rendered form stays submittable, so an
+	// abandoned tab cannot be replayed indefinitely.
+	csrfTokenTTL = 15 * time.Minute
+	// csrfMaxTokens caps the live set so repeated page loads cannot grow it
+	// without bound; the oldest token is evicted first.
+	csrfMaxTokens = 64
+)
+
+// csrfGuard holds the single-use tokens a page embeds in its forms. Every
+// render mints its own token and adds it to the set, so several open tabs,
+// reloads or prefetches do not invalidate each other. A POST must present a
+// token that is still within csrfTokenTTL and consumes it. The zero value is
+// ready to use.
 type csrfGuard struct {
-	mu    sync.Mutex
-	token string
+	mu     sync.Mutex
+	tokens map[string]time.Time // token -> issue time
+	now    func() time.Time     // clock; nil means time.Now (tests inject one)
 }
 
-// generate creates a new random token, stores it and returns it.
+func (g *csrfGuard) clock() time.Time {
+	if g.now != nil {
+		return g.now()
+	}
+	return time.Now()
+}
+
+// generate mints a new random token, adds it to the set and returns it. Expired
+// tokens are pruned, and the oldest is evicted once the set exceeds
+// csrfMaxTokens.
 func (g *csrfGuard) generate() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -26,24 +48,44 @@ func (g *csrfGuard) generate() string {
 	}
 	token := hex.EncodeToString(b)
 	g.mu.Lock()
-	g.token = token
-	g.mu.Unlock()
+	defer g.mu.Unlock()
+	now := g.clock()
+	if g.tokens == nil {
+		g.tokens = make(map[string]time.Time)
+	}
+	for t, issued := range g.tokens {
+		if now.Sub(issued) > csrfTokenTTL {
+			delete(g.tokens, t)
+		}
+	}
+	g.tokens[token] = now
+	for len(g.tokens) > csrfMaxTokens {
+		var oldest string
+		var oldestAt time.Time
+		for t, issued := range g.tokens {
+			if oldest == "" || issued.Before(oldestAt) {
+				oldest, oldestAt = t, issued
+			}
+		}
+		delete(g.tokens, oldest)
+	}
 	return token
 }
 
-// valid checks the supplied token against the stored one. A match consumes the
-// token (single-use).
+// valid reports whether token was issued by this guard and has not expired. A
+// match consumes the token (single-use); an expired one is dropped.
 func (g *csrfGuard) valid(token string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.token == "" || token == "" {
+	if token == "" {
 		return false
 	}
-	ok := g.token == token
-	if ok {
-		g.token = "" // single-use: consume after validation
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	issued, ok := g.tokens[token]
+	if !ok {
+		return false
 	}
-	return ok
+	delete(g.tokens, token) // single-use: consume after lookup
+	return g.clock().Sub(issued) <= csrfTokenTTL
 }
 
 // sameOriginPost reports whether a state-changing request was made by a page
