@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -322,6 +323,29 @@ func TestAccessSave_RequiresTokenAndOrigin(t *testing.T) {
 	}
 	if len(ac.replaced) != 1 {
 		t.Fatalf("replaced = %v; want exactly one replacement", ac.replaced)
+	}
+}
+
+func TestAccessSave_EarlierRenderedFormStillSaves(t *testing.T) {
+	h, _, ac, _ := newOperatorTest()
+	ac.chats = []store.AccessChat{{JID: "447700000001@s.whatsapp.net", Name: "Alice"}}
+	tokenRe := regexp.MustCompile(`name="csrf_token" value="([0-9a-f]+)"`)
+	render := func() string {
+		m := tokenRe.FindStringSubmatch(get(h.handleAccessPage, "/access").Body.String())
+		if m == nil {
+			t.Fatal("rendered /access carries no CSRF token")
+		}
+		return m[1]
+	}
+
+	first := render()
+	render() // a second tab, reload or prefetch must not invalidate the first form
+
+	w := post(h.handleAccessSave, "/access/save", url.Values{
+		"chat_jid": {"447700000001@s.whatsapp.net"}, "csrf_token": {first},
+	}, sameOriginHeaders)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/access?saved=1" {
+		t.Fatalf("save with first token: status = %d, Location = %q", w.Code, w.Header().Get("Location"))
 	}
 }
 
